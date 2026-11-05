@@ -1,0 +1,41 @@
+{{define "content"}}
+<h1>Người dùng</h1>
+<section class="card">
+  <h2>Tạo người dùng</h2>
+  <form method="post" action="/admin/users" class="grid">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Email <input type="email" name="email" required></label>
+    <label>Mật khẩu (tối thiểu 10 ký tự) <input type="password" name="password" minlength="10" required autocomplete="new-password"></label>
+    <label>Vai trò
+      <select name="role">{{range .Data.Roles}}<option>{{.}}</option>{{end}}</select>
+    </label>
+    <div class="wide"><button type="submit" class="primary">Tạo</button></div>
+  </form>
+  <p class="muted">viewer: chỉ xem · editor: thêm/sửa/xóa, import/export, audit · admin: tất cả + quản lý user, API key.</p>
+</section>
+
+<table>
+  <thead><tr><th>ID</th><th>Email</th><th>Vai trò</th><th>Trạng thái</th><th>Tạo lúc</th><th></th></tr></thead>
+  <tbody>
+  {{range .Data.Users}}
+    <tr>
+      <td>{{.ID}}</td><td>{{.Email}}</td><td>{{.Role}}</td>
+      <td>{{if .Disabled}}<span class="tag warn">đã khóa</span>{{else}}<span class="tag ok">hoạt động</span>{{end}}</td>
+      <td>{{fmtTime .CreatedAt}}</td>
+      <td>
+        <form method="post" action="/admin/users/{{.ID}}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          {{$cur := .Role}}
+          <select name="role">{{range $.Data.Roles}}<option {{if eq . $cur}}selected{{end}}>{{.}}</option>{{end}}</select>
+          <select name="disabled">
+            <option value="0" {{if not .Disabled}}selected{{end}}>hoạt động</option>
+            <option value="1" {{if .Disabled}}selected{{end}}>khóa</option>
+          </select>
+          <button type="submit">Lưu</button>
+        </form>
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

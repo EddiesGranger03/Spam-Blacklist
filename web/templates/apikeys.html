@@ -1,0 +1,52 @@
+{{define "content"}}
+<h1>API keys</h1>
+
+{{if .Data.NewKey}}
+<div class="flash ok">
+  <p><strong>Key mới cho “{{.Data.NewFor}}”</strong> – sao chép ngay, hệ thống KHÔNG thể hiển thị lại:</p>
+  <p class="mono key">{{.Data.NewKey}}</p>
+</div>
+{{end}}
+
+<section class="card">
+  <h2>Tạo key</h2>
+  <form method="post" action="/admin/apikeys" class="grid">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Tên (khách hàng / hệ thống) <input name="name" required maxlength="100"></label>
+    <label>Giới hạn tốc độ (request/giây) <input type="number" name="rps_limit" value="100" min="1" required></label>
+    <label>Hạn mức mỗi ngày (0 = không giới hạn) <input type="number" name="daily_quota" value="0" min="0" required></label>
+    <label>Hết hạn sau (ngày, để trống = không) <input type="number" name="expires_days" min="1"></label>
+    <div class="wide"><button type="submit" class="primary">Tạo key</button></div>
+  </form>
+  <p class="muted">Gọi API: <code>curl -H "X-API-Key: vsf_xxxxxxxx_…" "http://HOST/v1/check?type=phone&amp;value=0901234567"</code></p>
+</section>
+
+<table>
+  <thead><tr><th>ID</th><th>Tên</th><th>Prefix</th><th>Trạng thái</th><th>RPS</th><th>Quota/ngày</th><th>Hết hạn</th><th>Dùng lần cuối</th><th></th></tr></thead>
+  <tbody>
+  {{range .Data.Keys}}
+    <tr>
+      <td>{{.ID}}</td><td>{{.Name}}{{with .RotatedFrom}} <span class="muted small">(xoay từ #{{deref .}})</span>{{end}}</td>
+      <td class="mono">{{.Prefix}}</td>
+      <td>{{if eq .Status "active"}}<span class="tag ok">active</span>{{else}}<span class="tag warn">{{.Status}}</span>{{end}}</td>
+      <td>{{.RPSLimit}}</td><td>{{.DailyQuota}}</td>
+      <td>{{if expired .ExpiresAt}}<span class="tag warn">đã hết hạn</span>{{else}}{{fmtTimePtr .ExpiresAt}}{{end}}</td>
+      <td>{{fmtTimePtr .LastUsedAt}}</td>
+      <td>
+        {{if eq .Status "active"}}
+        <form method="post" action="/admin/apikeys/{{.ID}}/rotate" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="number" name="grace_days" value="7" min="0" max="90" title="Số ngày key cũ còn dùng được">
+          <button type="submit">Xoay</button>
+        </form>
+        <form method="post" action="/admin/apikeys/{{.ID}}/revoke" class="inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <button type="submit" class="danger">Thu hồi</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

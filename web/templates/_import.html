@@ -1,0 +1,22 @@
+{{define "import_status"}}
+<div class="job" {{if .Data.Running}}hx-get="/admin/import/{{.Data.ID}}" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
+  <p><strong>Job {{.Data.ID}}</strong> –
+    {{if eq .Data.State "running"}}đang chạy… đã đọc {{.Data.Rows}} dòng
+    {{else if eq .Data.State "done"}}<span class="tag ok">hoàn tất</span>
+    {{else}}<span class="tag warn">thất bại</span>{{end}}
+  </p>
+  {{if eq .Data.State "done"}}
+    <ul>
+      <li>Thêm mới: <strong>{{.Data.Inserted}}</strong></li>
+      <li>Cập nhật (đã tồn tại): <strong>{{.Data.Updated}}</strong></li>
+      <li>Dòng bị loại do lỗi: <strong>{{.Data.Rejected}}</strong></li>
+    </ul>
+  {{end}}
+  {{with .Data.Err}}<div class="flash err">{{.}}</div>{{end}}
+  {{if .Data.Errors}}
+    <details open><summary>Lỗi (tối đa 20 dòng đầu)</summary>
+      <ul>{{range .Data.Errors}}<li>{{.}}</li>{{end}}</ul>
+    </details>
+  {{end}}
+</div>
+{{end}}

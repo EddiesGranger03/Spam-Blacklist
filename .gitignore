@@ -1,0 +1,29 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Test data / CSV
+*.csv
+
+# Local IDE and editor settings
+.vscode/
+.idea/
+
+# Environment / Secrets
+.env
+.env.*
+!.env.example
+
+# OS files
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
+
+# Temporary files
+tmp/
+*.log
+

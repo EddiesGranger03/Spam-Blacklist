@@ -1,0 +1,14 @@
+{{define "content"}}
+<section class="card narrow">
+  <h1>Đăng nhập</h1>
+  <form method="post" action="/admin/login" autocomplete="on">
+    <label>Email
+      <input type="email" name="email" value="{{.Data.Email}}" required autofocus autocomplete="username">
+    </label>
+    <label>Mật khẩu
+      <input type="password" name="password" required autocomplete="current-password">
+    </label>
+    <button type="submit">Đăng nhập</button>
+  </form>
+</section>
+{{end}}

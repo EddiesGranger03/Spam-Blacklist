@@ -1,0 +1,13 @@
+{{define "content"}}
+<h1>Check thử</h1>
+<p class="muted">Chạy đúng đường check của API thật (chuẩn hóa → Bloom → cache → DB).</p>
+<form class="filters" hx-post="/admin/check" hx-target="#result">
+  <select name="type">
+    <option value="phone" {{if eq .Data.Type "phone"}}selected{{end}}>Số điện thoại</option>
+    <option value="url" {{if eq .Data.Type "url"}}selected{{end}}>URL</option>
+  </select>
+  <input name="value" value="{{.Data.Value}}" placeholder="0901 234 567 hoặc http://evil.com/x" required autofocus>
+  <button type="submit" class="primary">Kiểm tra</button>
+</form>
+<div id="result"></div>
+{{end}}

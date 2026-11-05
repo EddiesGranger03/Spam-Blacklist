@@ -1,0 +1,15 @@
+{{define "check_result"}}
+{{if .Data.Err}}
+  <div class="flash err">{{.Data.Err}}</div>
+{{else}}
+  {{with .Data.Result}}
+    {{if .Blacklisted}}
+      <div class="flash err"><strong>BỊ BLACKLIST</strong> – {{.Match.Category}}, risk {{.Match.RiskScore}}</div>
+      <p>Khớp entry <strong>#{{.Match.EntryID}}</strong> ({{.Match.MatchType}}: <span class="mono">{{.Match.MatchedValue}}</span>)</p>
+    {{else}}
+      <div class="flash ok"><strong>An toàn</strong> – không có trong blacklist.</div>
+    {{end}}
+    <p class="muted">Đã chuẩn hóa: <span class="mono">{{.Normalized}}</span></p>
+  {{end}}
+{{end}}
+{{end}}

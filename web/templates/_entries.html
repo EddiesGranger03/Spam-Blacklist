@@ -1,0 +1,80 @@
+{{define "entries_table"}}
+{{if .Data.SearchBad}}
+  <p class="muted">Từ khóa không phải SĐT/URL hợp lệ nên không có kết quả.</p>
+{{else}}
+<table>
+  <thead><tr>
+    <th><a href="{{.Data.ToggleURL}}" hx-get="{{.Data.ToggleURL}}" hx-target="#table" hx-push-url="true">ID {{if .Data.Asc}}▲{{else}}▼{{end}}</a></th><th>Loại</th><th>Cách khớp</th><th>Giá trị</th><th>Category</th><th>Risk</th>
+    <th>Hết hạn</th><th>Tạo bởi</th>{{if .CanEdit}}<th></th>{{end}}
+  </tr></thead>
+  <tbody>
+  {{range .Data.Entries}}
+    <tr>
+      <td>{{.ID}}</td><td>{{.Type}}</td><td>{{.MatchType}}</td>
+      <td class="mono">{{shorten .Value 80}}</td><td>{{.Category}}</td><td>{{.RiskScore}}</td>
+      <td>{{if expired .ExpiresAt}}<span class="tag warn">đã hết hạn</span>{{else}}{{fmtTimePtr .ExpiresAt}}{{end}}</td>
+      <td>{{.CreatedBy}}</td>
+      {{if $.CanEdit}}
+      <td class="actions">
+        <button class="link" hx-get="/admin/entries/{{.ID}}/edit" hx-target="#form-slot">Sửa</button>
+        <button class="link danger" hx-delete="/admin/entries/{{.ID}}" hx-confirm="Xóa mục này khỏi blacklist?"
+                hx-target="closest tr" hx-swap="outerHTML">Xóa</button>
+      </td>
+      {{end}}
+    </tr>
+  {{else}}
+    <tr><td colspan="9" class="muted">Không có bản ghi nào.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+<div class="pager">
+  {{if gt .Data.Cursor 0}}<a href="/admin/entries">← Trang đầu</a>{{end}}
+  {{if .Data.NextURL}}<button hx-get="{{.Data.NextURL}}" hx-target="#table" hx-push-url="true">Trang sau →</button>{{end}}
+</div>
+{{end}}
+{{end}}
+
+{{define "entry_form"}}
+<section class="card">
+  <h2>{{if .Data.ID}}Sửa entry #{{.Data.ID}}{{else}}Thêm vào blacklist{{end}}</h2>
+  {{with .Data.Error}}<div class="flash err">{{.}}</div>{{end}}
+  <form {{if .Data.ID}}hx-put="/admin/entries/{{.Data.ID}}"{{else}}hx-post="/admin/entries"{{end}}
+        hx-target="#form-slot" class="grid">
+    <label>Loại
+      <select name="type" {{if .Data.ID}}disabled{{end}}>
+        <option value="phone" {{if eq .Data.Type "phone"}}selected{{end}}>Số điện thoại</option>
+        <option value="url" {{if eq .Data.Type "url"}}selected{{end}}>URL</option>
+      </select>
+      {{if .Data.ID}}<input type="hidden" name="type" value="{{.Data.Type}}">{{end}}
+    </label>
+    <label>Cách khớp (URL)
+      <select name="match_type" {{if .Data.ID}}disabled{{end}}>
+        <option value="">(mặc định: domain / SĐT: exact)</option>
+        <option value="domain" {{if eq .Data.MatchType "domain"}}selected{{end}}>domain – cả subdomain</option>
+        <option value="prefix" {{if eq .Data.MatchType "prefix"}}selected{{end}}>prefix – host + đầu path</option>
+        <option value="exact" {{if eq .Data.MatchType "exact"}}selected{{end}}>exact – đúng URL</option>
+      </select>
+      {{if .Data.ID}}<input type="hidden" name="match_type" value="{{.Data.MatchType}}">{{end}}
+    </label>
+    <label class="wide">Giá trị
+      <input name="value" value="{{.Data.Value}}" required {{if .Data.ID}}readonly{{end}}
+             placeholder="0901 234 567  hoặc  evil.com  hoặc  evil.com/shop">
+    </label>
+    <label>Category
+      <select name="category">
+        {{range $.Categories}}<option {{if eq . $.Data.Category}}selected{{end}}>{{.}}</option>{{end}}
+      </select>
+    </label>
+    <label>Risk score (0–100)
+      <input type="number" name="risk_score" min="0" max="100" value="{{.Data.RiskScore}}" required>
+    </label>
+    <label>Nguồn <input name="source" value="{{.Data.Source}}" maxlength="200"></label>
+    <label>Hết hạn (tùy chọn) <input type="date" name="expires_at" value="{{.Data.ExpiresAt}}"></label>
+    <label class="wide">Ghi chú <input name="note" value="{{.Data.Note}}" maxlength="2000"></label>
+    <div class="wide">
+      <button type="submit" class="primary">Lưu</button>
+      <a href="/admin/entries" class="btn">Hủy</a>
+    </div>
+  </form>
+</section>
+{{end}}

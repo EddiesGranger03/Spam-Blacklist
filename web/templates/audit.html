@@ -1,0 +1,25 @@
+{{define "content"}}
+<h1>Audit log</h1>
+<p class="muted">Nhật ký chỉ-thêm: ai làm gì, lúc nào. Không có chức năng sửa/xóa.</p>
+<div id="table">{{template "audit_table" .}}</div>
+{{end}}
+
+{{define "audit_table"}}
+<table>
+  <thead><tr><th>ID</th><th>Thời gian</th><th>Người thực hiện</th><th>Hành động</th><th>Entry</th><th>IP</th><th>Chi tiết</th></tr></thead>
+  <tbody>
+  {{range .Data.Logs}}
+    <tr>
+      <td>{{.ID}}</td><td>{{fmtTime .CreatedAt}}</td><td>{{.ActorEmail}}</td><td>{{.Action}}</td>
+      <td>{{with .EntryID}}#{{deref .}}{{end}}</td><td>{{.IP}}</td>
+      <td class="mono small">{{shorten .Detail 160}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="7" class="muted">Chưa có bản ghi.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+<div class="pager">
+  {{if .Data.NextURL}}<button hx-get="{{.Data.NextURL}}" hx-target="#table" hx-push-url="true">Cũ hơn →</button>{{end}}
+</div>
+{{end}}

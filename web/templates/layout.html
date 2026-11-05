@@ -1,0 +1,40 @@
+{{define "layout"}}<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}'>
+<title>{{.Title}} · VSF Blacklist</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/htmx.min.js" defer></script>
+</head>
+<body hx-headers='{"X-CSRF-Token":"{{.CSRF}}"}'>
+{{if .User}}
+<header class="nav">
+  <strong class="brand">VSF Blacklist</strong>
+  <nav>
+    <a href="/admin/entries" {{if eq .Active "entries"}}class="active"{{end}}>Blacklist</a>
+    <a href="/admin/check" {{if eq .Active "check"}}class="active"{{end}}>Check thử</a>
+    {{if .CanEdit}}
+    <a href="/admin/import" {{if eq .Active "import"}}class="active"{{end}}>Import/Export</a>
+    <a href="/admin/audit" {{if eq .Active "audit"}}class="active"{{end}}>Audit log</a>
+    {{end}}
+    {{if .IsAdmin}}
+    <a href="/admin/users" {{if eq .Active "users"}}class="active"{{end}}>Người dùng</a>
+    <a href="/admin/apikeys" {{if eq .Active "apikeys"}}class="active"{{end}}>API keys</a>
+    {{end}}
+  </nav>
+  <form method="post" action="/admin/logout" class="logout">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <span class="who">{{.User.Email}} · {{.User.Role}}</span>
+    <button type="submit" class="link">Đăng xuất</button>
+  </form>
+</header>
+{{end}}
+<main>
+  {{with .Flash}}<div class="flash ok">{{.}}</div>{{end}}
+  {{with .Error}}<div class="flash err">{{.}}</div>{{end}}
+  {{template "content" .}}
+</main>
+</body>
+</html>{{end}}

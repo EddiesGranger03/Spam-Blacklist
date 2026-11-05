@@ -1,0 +1,30 @@
+{{define "content"}}
+<h1>Import / Export</h1>
+<section class="card">
+  <h2>Import CSV</h2>
+  <p class="muted">
+    Dòng đầu là tiêu đề. Cột bắt buộc: <code>value</code> (và <code>type</code> nếu không chọn loại mặc định bên dưới).
+    Cột tùy chọn: <code>match_type, category, risk_score, source, note, expires_at</code>.
+    Trùng khóa thì cập nhật. Chạy nền, có thể mất vài phút với file lớn.
+  </p>
+  <form hx-post="/admin/import" hx-encoding="multipart/form-data" hx-target="#job" class="grid">
+    <label>Loại mặc định (khi CSV không có cột type)
+      <select name="default_type">
+        <option value="">(không)</option>
+        <option value="phone">Số điện thoại</option>
+        <option value="url">URL</option>
+      </select>
+    </label>
+    <label>File CSV <input type="file" name="file" accept=".csv,text/csv" required></label>
+    <div class="wide"><button type="submit" class="primary">Bắt đầu import</button></div>
+  </form>
+  <div id="job"></div>
+</section>
+
+<section class="card">
+  <h2>Export CSV</h2>
+  <a class="btn" href="/admin/export">Tải tất cả</a>
+  <a class="btn" href="/admin/export?type=phone">Chỉ số điện thoại</a>
+  <a class="btn" href="/admin/export?type=url">Chỉ URL</a>
+</section>
+{{end}}
