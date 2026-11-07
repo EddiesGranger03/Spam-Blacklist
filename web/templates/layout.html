@@ -36,5 +36,8 @@
   {{with .Error}}<div class="flash err">{{.}}</div>{{end}}
   {{template "content" .}}
 </main>
+{{if .IsAdmin}}
+{{template "inspector_dock" .}}
+{{end}}
 </body>
 </html>{{end}}

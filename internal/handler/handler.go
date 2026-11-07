@@ -22,19 +22,21 @@ import (
 	"vsf/internal/changefeed"
 	"vsf/internal/checker"
 	"vsf/internal/config"
+	"vsf/internal/inspector"
 	"vsf/internal/model"
 	"vsf/internal/store"
 	"vsf/web"
 )
 
 type Deps struct {
-	Cfg     config.Config
-	Log     *slog.Logger
-	Store   *store.Store
-	Checker *checker.Checker
-	Feed    *changefeed.Feed
-	Bloom   *bloom.Manager
-	APIKeys *apikey.Service
+	Cfg       config.Config
+	Log       *slog.Logger
+	Store     *store.Store
+	Checker   *checker.Checker
+	Feed      *changefeed.Feed
+	Bloom     *bloom.Manager
+	APIKeys   *apikey.Service
+	Inspector *inspector.Inspector
 }
 
 type Handler struct {
@@ -44,11 +46,20 @@ type Handler struct {
 	throttleUser *auth.Throttle
 	jobs         *importJobs
 	cookieName   string
+	routeIndex   map[string]routeInfo
 }
 
 var pageNames = []string{"login", "entries", "check", "import", "audit", "users", "apikeys"}
 
 func New(d Deps) (*Handler, error) {
+	if d.Log == nil {
+		d.Log = slog.Default()
+	}
+
+	if d.Inspector == nil {
+		d.Inspector = inspector.New(200)
+	}
+
 	h := &Handler{
 		Deps:         d,
 		tmpl:         map[string]*template.Template{},
@@ -71,6 +82,13 @@ func New(d Deps) (*Handler, error) {
 
 		h.tmpl[p] = t
 	}
+
+	inspectorTmpl, err := template.New("inspector").Funcs(templateFuncs).ParseFS(web.FS,
+		"templates/layout.html", "templates/_*.html")
+	if err != nil {
+		return nil, fmt.Errorf("parse template inspector: %w", err)
+	}
+	h.tmpl["inspector"] = inspectorTmpl
 
 	return h, nil
 }
@@ -132,6 +150,13 @@ func (h *Handler) Router() http.Handler {
 
 			r.Group(func(r chi.Router) {
 				r.Use(requireRole(model.RoleAdmin))
+				r.Get("/inspector", h.inspectorPage)
+				r.Get("/inspector/feed", h.inspectorFeed)
+				r.Get("/inspector/stats", h.inspectorStats)
+				r.Get("/inspector/detail/close", h.inspectorCloseDetail)
+				r.Get("/inspector/{id}", h.inspectorDetail)
+				r.Post("/inspector/clear", h.inspectorClear)
+				r.Get("/audit/verify", h.auditVerify)
 				r.Get("/users", h.usersPage)
 				r.Post("/users", h.userCreate)
 				r.Post("/users/{id}", h.userUpdate)
@@ -142,6 +167,8 @@ func (h *Handler) Router() http.Handler {
 			})
 		})
 	})
+
+	h.routeIndex = buildRouteIndex(r)
 
 	return r
 }
@@ -203,6 +230,8 @@ func actorFrom(r *http.Request) model.Actor {
 type pageData struct {
 	Title      string
 	Active     string
+	Screen     string
+	ScreenName string
 	CSRF       string
 	Flash      string
 	Error      string
@@ -220,7 +249,7 @@ var flashMessages = map[string]string{
 }
 
 func (h *Handler) newPage(r *http.Request, title, active string, data any) pageData {
-	pd := pageData{Title: title, Active: active, Categories: model.Categories, Data: data,
+	pd := pageData{Title: title, Active: active, Screen: r.URL.Path, ScreenName: title, Categories: model.Categories, Data: data,
 		Flash: flashMessages[r.URL.Query().Get("flash")]}
 
 	if s := sessionFrom(r); s != nil {

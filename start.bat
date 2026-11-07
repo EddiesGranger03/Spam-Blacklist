@@ -50,6 +50,16 @@ set SESSION_SECRET=dev-secret-not-for-production-0123456789
 set BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 set BOOTSTRAP_ADMIN_PASSWORD=ChangeMe-12345
 
+rem Khoa ma hoa du lieu (DATA_KEY, DATA_PEPPER) nam trong file rieng, KHONG commit len git.
+if not exist "%~dp0.env.local.bat" (
+    echo.
+    echo [LOI] Thieu file .env.local.bat chua DATA_KEY va DATA_PEPPER.
+    echo       Xem muc "Ma hoa du lieu" trong README.md de tao file nay.
+    pause
+    exit /b 1
+)
+call "%~dp0.env.local.bat"
+
 echo.
 echo =====================================================
 echo   Server dang chay:  http://127.0.0.1:8090

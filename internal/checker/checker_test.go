@@ -1,8 +1,10 @@
 package checker
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +12,7 @@ import (
 
 	"vsf/internal/model"
 	"vsf/internal/normalize"
+	"vsf/internal/seal"
 )
 
 type fakeFilter struct{ answer bool }
@@ -181,5 +184,39 @@ func TestBatchKeepsOrderAndIsolatesErrors(t *testing.T) {
 
 	if out[0].Input != "0901234567" || out[2].Input != "http://a.com/x" {
 		t.Fatal("results must keep input order")
+	}
+}
+
+func TestCacheIsSealedAndKeyHidesInput(t *testing.T) {
+	sl, err := seal.New("0123456789abcdef0123456789abcdef-data", "fedcba9876543210fedcba9876543210-pepper", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	normalize.SetHasher(sl.Hasher())
+
+	cache := newMemCache()
+	fd := &fakeFinder{entries: []model.Entry{{ID: 7, Type: "phone", MatchType: "exact", Value: "+84901234567", Category: "spam", RiskScore: 90}}}
+	c := newChecker(fakeFilter{true}, cache, fd)
+	c.SetCacheSealer(sl)
+
+	for i := 0; i < 2; i++ { // second call must be served from the sealed cache
+		res, err := c.Check(context.Background(), normalize.TypePhone, "0901234567")
+		if err != nil || !res.Blacklisted || res.Match == nil || res.Match.MatchedValue != "+84901234567" {
+			t.Fatalf("call %d: %+v, %v", i, res, err)
+		}
+	}
+
+	if fd.calls.Load() != 1 {
+		t.Fatalf("expected 1 DB call (second from cache), got %d", fd.calls.Load())
+	}
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	for k, v := range cache.data {
+		if strings.Contains(k, "901234567") || bytes.Contains(v, []byte("901234567")) || bytes.Contains(v, []byte("spam")) {
+			t.Errorf("cache leaks plaintext: key=%q", k)
+		}
 	}
 }

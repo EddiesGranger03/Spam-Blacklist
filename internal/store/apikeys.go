@@ -46,7 +46,7 @@ func (s *Store) CreateAPIKey(ctx context.Context, n NewAPIKey, actor model.Actor
 		return model.APIKey{}, err
 	}
 
-	if err := writeAudit(ctx, tx, actor, "apikey.create", 0, map[string]any{
+	if err := s.writeAudit(ctx, tx, actor, "apikey.create", 0, map[string]any{
 		"id": k.ID, "name": k.Name, "prefix": k.Prefix, "rotated_from": k.RotatedFrom}); err != nil {
 		return model.APIKey{}, err
 	}
@@ -101,7 +101,7 @@ func (s *Store) RevokeAPIKey(ctx context.Context, id int64, actor model.Actor) e
 		return ErrNotFound
 	}
 
-	if err := writeAudit(ctx, tx, actor, "apikey.revoke", 0, map[string]any{"id": id}); err != nil {
+	if err := s.writeAudit(ctx, tx, actor, "apikey.revoke", 0, map[string]any{"id": id}); err != nil {
 		return err
 	}
 

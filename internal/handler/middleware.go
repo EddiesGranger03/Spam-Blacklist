@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"errors"
 	"html/template"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"vsf/internal/auth"
+	"vsf/internal/inspector"
 	"vsf/internal/metrics"
 	"vsf/internal/model"
 	"vsf/internal/store"
@@ -41,6 +44,9 @@ func (h *Handler) securityHeaders(next http.Handler) http.Handler {
 		hd.Set("X-Content-Type-Options", "nosniff")
 		hd.Set("X-Frame-Options", "DENY")
 		hd.Set("Referrer-Policy", "same-origin")
+		hd.Set("Cross-Origin-Opener-Policy", "same-origin")
+		hd.Set("Cross-Origin-Resource-Policy", "same-origin")
+		hd.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
 
 		if h.Cfg.CookieSecure {
 			hd.Set("Strict-Transport-Security", "max-age=31536000")
@@ -86,6 +92,17 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (h *Handler) instrument(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+
+		path := r.URL.Path
+		isInspectorInternal := strings.HasPrefix(path, "/admin/inspector") || strings.HasPrefix(path, "/static/")
+
+		var bodySnippet string
+		if !isInspectorInternal && r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) {
+			b, _ := io.ReadAll(io.LimitReader(r.Body, 2048))
+			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(b), r.Body))
+			bodySnippet = string(b)
+		}
+
 		sw := &statusWriter{ResponseWriter: w}
 		next.ServeHTTP(sw, r)
 
@@ -101,12 +118,32 @@ func (h *Handler) instrument(next http.Handler) http.Handler {
 		dur := time.Since(start)
 		metrics.HTTPDuration.WithLabelValues(r.Method, route, strconv.Itoa(sw.status)).Observe(dur.Seconds())
 
+		if !isInspectorInternal && h.Inspector != nil {
+			h.Inspector.Record(inspector.Record{
+				Time:           start,
+				Method:         r.Method,
+				Path:           path,
+				Query:          r.URL.RawQuery,
+				FullPath:       r.URL.RequestURI(),
+				Status:         sw.status,
+				Duration:       dur,
+				ClientIP:       clientIP(r),
+				UserAgent:      r.UserAgent(),
+				RequestHeaders: inspector.ExtractHeaders(r.Header),
+				RequestBody:    inspector.RedactBody(path, bodySnippet),
+				Route:          route,
+				Screen:         inspector.ScreenOf(r),
+			})
+		}
+
 		if route == "/healthz" || route == "/metrics" || (strings.HasPrefix(route, "/v1") && sw.status < 400) {
 			return
 		}
 
-		h.Log.Info("http", "method", r.Method, "route", route, "status", sw.status,
-			"ms", dur.Milliseconds(), "ip", clientIP(r), "req_id", r.Context().Value(requestIDKey()))
+		if h.Log != nil {
+			h.Log.Info("http", "method", r.Method, "route", route, "status", sw.status,
+				"ms", dur.Milliseconds(), "ip", clientIP(r), "req_id", r.Context().Value(requestIDKey()))
+		}
 	})
 }
 
@@ -127,6 +164,11 @@ func redirectToLogin(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sess := sessionFrom(r); sess != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		c, err := r.Cookie(h.cookieName)
 		if err != nil || c.Value == "" {
 			redirectToLogin(w, r)
@@ -246,5 +288,27 @@ var templateFuncs = template.FuncMap{
 		}
 
 		return *p
+	},
+	"lower": strings.ToLower,
+	"statusClass": func(status int) string {
+		if status >= 200 && status < 300 {
+			return "tag ok"
+		}
+		if status >= 400 && status < 500 {
+			return "tag warn"
+		}
+		if status >= 500 {
+			return "tag err"
+		}
+		return "tag"
+	},
+	"latencyClass": func(d time.Duration) string {
+		if d < 10*time.Millisecond {
+			return "latency-fast"
+		}
+		if d < 100*time.Millisecond {
+			return "latency-med"
+		}
+		return "latency-slow"
 	},
 }

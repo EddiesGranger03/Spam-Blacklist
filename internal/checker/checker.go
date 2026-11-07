@@ -2,6 +2,7 @@ package checker
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +59,7 @@ type Checker struct {
 	region string
 	filter Filter
 	cache  cache.Cache
+	sealer CacheSealer
 	finder EntryFinder
 	epoch  Epocher
 	sf     singleflight.Group
@@ -66,6 +68,19 @@ type Checker struct {
 func New(region string, f Filter, c cache.Cache, finder EntryFinder, e Epocher) *Checker {
 	return &Checker{region: region, filter: f, cache: c, finder: finder, epoch: e}
 }
+
+// CacheSealer encrypts cache values so Redis never holds a matched value in clear.
+// *seal.Sealer satisfies it.
+type CacheSealer interface {
+	Seal(plaintext, aad string) ([]byte, error)
+	Open(blob []byte, aad string) (string, error)
+}
+
+const cacheAAD = "check-cache"
+
+// SetCacheSealer makes the checker encrypt what it writes to the cache and use
+// the keyed blind index (not the raw phone/URL) in cache keys.
+func (c *Checker) SetCacheSealer(cs CacheSealer) { c.sealer = cs }
 
 type cached struct {
 	Match *Match `json:"m"`
@@ -96,11 +111,16 @@ func (c *Checker) Check(ctx context.Context, typ normalize.Type, raw string) (Re
 		return res, nil
 	}
 
-	cacheKey := fmt.Sprintf("chk:%s:%s:%s", c.epoch.Epoch(), typ, normalized)
+	cacheID := normalized
+	if len(keys[0].Blind) > 0 { // keys[0] is the exact candidate; its blind index hides the raw value
+		cacheID = hex.EncodeToString(keys[0].Blind)
+	}
+
+	cacheKey := fmt.Sprintf("chk:%s:%s:%s", c.epoch.Epoch(), typ, cacheID)
 
 	if b, ok := c.cache.Get(ctx, cacheKey); ok {
 		var cv cached
-		if json.Unmarshal(b, &cv) == nil {
+		if c.openCache(b, &cv) == nil {
 			metrics.CheckLayer.WithLabelValues("cache").Inc()
 			return c.finish(res, cv.Match), nil
 		}
@@ -115,7 +135,7 @@ func (c *Checker) Check(ctx context.Context, typ normalize.Type, raw string) (Re
 		}
 
 		m := best(entries)
-		if b, err := json.Marshal(cached{Match: m}); err == nil {
+		if b, err := c.sealCache(cached{Match: m}); err == nil {
 			c.cache.Set(dbctx, cacheKey, b)
 		}
 
@@ -192,4 +212,26 @@ func (c *Checker) CheckBatch(ctx context.Context, items []Item) []BatchResult {
 
 	wg.Wait()
 	return out
+}
+
+func (c *Checker) sealCache(v cached) ([]byte, error) {
+	b, err := json.Marshal(v)
+	if err != nil || c.sealer == nil {
+		return b, err
+	}
+
+	return c.sealer.Seal(string(b), cacheAAD)
+}
+
+func (c *Checker) openCache(b []byte, v *cached) error {
+	if c.sealer != nil {
+		plain, err := c.sealer.Open(b, cacheAAD)
+		if err != nil {
+			return err
+		}
+
+		b = []byte(plain)
+	}
+
+	return json.Unmarshal(b, v)
 }

@@ -20,8 +20,10 @@ import (
 	"vsf/internal/checker"
 	"vsf/internal/config"
 	"vsf/internal/handler"
+	"vsf/internal/inspector"
 	"vsf/internal/metrics"
 	"vsf/internal/model"
+	"vsf/internal/seal"
 	"vsf/internal/store"
 )
 
@@ -52,6 +54,18 @@ func run(log *slog.Logger) error {
 	}
 
 	defer st.Close()
+
+	sl, err := seal.New(cfg.DataKey, cfg.DataPepper, int16(cfg.DataKeyVersion))
+	if err != nil {
+		return err
+	}
+
+	// Keys must be installed before Migrate: the first start after upgrading
+	// converts the plaintext table to the encrypted layout.
+	st.SetSealer(sl)
+	st.SetAuditKey(store.AuditKeyFrom(cfg.AuditKey, cfg.SessionSecret))
+	log.Info("encryption at rest enabled", "key_version", cfg.DataKeyVersion)
+
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
@@ -72,6 +86,7 @@ func run(log *slog.Logger) error {
 	bm := bloom.NewManager()
 	feed := changefeed.New(st, bm, log)
 	chk := checker.New(cfg.DefaultRegion, bm, rc, st, feed)
+	chk.SetCacheSealer(sl)
 	keys := apikey.NewService(st, rdb, cfg.RateLimitRPS)
 
 	metrics.RegisterGauges(
@@ -81,7 +96,8 @@ func run(log *slog.Logger) error {
 		func() float64 { n, _ := st.PoolStats(); return float64(n) },
 	)
 
-	h, err := handler.New(handler.Deps{Cfg: cfg, Log: log, Store: st, Checker: chk, Feed: feed, Bloom: bm, APIKeys: keys})
+	ins := inspector.New(200)
+	h, err := handler.New(handler.Deps{Cfg: cfg, Log: log, Store: st, Checker: chk, Feed: feed, Bloom: bm, APIKeys: keys, Inspector: ins})
 	if err != nil {
 		return err
 	}

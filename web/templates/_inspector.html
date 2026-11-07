@@ -1,0 +1,194 @@
+{{define "inspector_dock"}}
+<details class="inspector-dock" id="inspector-dock" data-screen="{{.Screen}}">
+  <summary class="inspector-dock-bar">
+    <div class="dock-bar-left">
+      <span class="live-indicator"><span class="live-dot"></span> LIVE INSPECTOR</span>
+      <span class="dock-screen mono" title="{{.Screen}}">{{.Screen}}</span>
+      <span id="inspector-stats"
+            hx-get="/admin/inspector/stats"
+            hx-include="#inspector-screen-input"
+            hx-trigger="load, every 3s"
+            hx-swap="innerHTML">
+      </span>
+    </div>
+    <div class="dock-bar-right">
+      <span class="dock-hint dock-hint-open">▲ Mở rộng</span>
+      <span class="dock-hint dock-hint-close">▼ Thu gọn</span>
+    </div>
+  </summary>
+
+  <div class="inspector-dock-body">
+    <div class="inspector-controls">
+      <form class="filters dock-filters"
+            hx-get="/admin/inspector/feed"
+            hx-target="#inspector-table-body"
+            hx-swap="innerHTML"
+            hx-trigger="change, keyup delay:300ms from:input[name=inspector_q]">
+        <input type="hidden" name="inspector_screen" id="inspector-screen-input" value="{{.Screen}}">
+
+        <select name="inspector_method" class="small">
+          <option value="">Method</option>
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="DELETE">DELETE</option>
+        </select>
+
+        <select name="inspector_status" class="small">
+          <option value="">Status</option>
+          <option value="2xx">2xx Thành công</option>
+          <option value="4xx">4xx Lỗi client</option>
+          <option value="5xx">5xx Lỗi server</option>
+          <option value="errors">Tất cả lỗi</option>
+        </select>
+
+        <input type="text" name="inspector_q" placeholder="Lọc Path, Query, IP..." class="small dock-search">
+      </form>
+
+      <div class="dock-btns">
+        <button type="button" class="btn small" id="dock-pause-btn">⏸ Tạm dừng</button>
+        <button type="button" class="btn danger small"
+                hx-post="/admin/inspector/clear"
+                hx-target="#inspector-table-body"
+                hx-swap="innerHTML">
+          Xóa
+        </button>
+      </div>
+    </div>
+
+    <div class="dock-table-wrap">
+      <table class="inspector-table">
+        <thead>
+          <tr>
+            <th class="col-time">Thời gian</th>
+            <th class="col-method">Method</th>
+            <th class="col-status">Status</th>
+            <th class="col-latency">Độ trễ</th>
+            <th>Path &amp; Query</th>
+            <th class="col-ip">Client IP</th>
+            <th class="col-detail">Chi tiết</th>
+          </tr>
+        </thead>
+        <tbody id="inspector-table-body"
+               hx-get="/admin/inspector/feed"
+               hx-trigger="load, every 2s"
+               hx-include="[name='inspector_screen'], [name='inspector_method'], [name='inspector_status'], [name='inspector_q']"
+               hx-swap="innerHTML">
+          <tr><td colspan="7" class="muted dock-empty">Đang tải luồng request...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</details>
+
+<script src="/static/inspector.js" defer></script>
+{{end}}
+
+{{define "inspector_stats"}}
+<span class="dock-stat-pill"><strong class="mono">{{.Data.TotalRequests}}</strong> reqs</span>
+<span class="dock-stat-pill"><strong class="mono">{{printf "%.1f" .Data.RecentRPS}}</strong> rps</span>
+<span class="dock-stat-pill">Avg: <strong class="mono">{{.Data.AvgLatency}}</strong></span>
+<span class="dock-stat-pill ok">2xx: <strong class="mono">{{.Data.Count2xx}}</strong></span>
+{{if gt .Data.Count4xx 0}}<span class="dock-stat-pill warn">4xx: <strong class="mono">{{.Data.Count4xx}}</strong></span>{{end}}
+{{if gt .Data.Count5xx 0}}<span class="dock-stat-pill err">5xx: <strong class="mono">{{.Data.Count5xx}}</strong></span>{{end}}
+{{end}}
+
+{{define "inspector_rows"}}
+  {{range .Data.Records}}
+    <tr class="inspector-row {{if .IsError}}row-error{{end}}"
+        data-id="{{.ID}}"
+        hx-get="/admin/inspector/{{.ID}}"
+        hx-target="#detail-{{.ID}} > td"
+        hx-swap="innerHTML">
+      <td class="mono small">{{.TimeFormatted}}</td>
+      <td><span class="badge-method badge-{{lower .Method}}">{{.Method}}</span></td>
+      <td><span class="{{statusClass .Status}}">{{.Status}}</span></td>
+      <td class="mono small {{latencyClass .Duration}}">{{.DurationFormatted}}</td>
+      <td class="mono inspector-path">
+        <strong>{{.Path}}</strong>{{if .Query}}<span class="muted">?{{.Query}}</span>{{end}}
+      </td>
+      <td class="mono small">{{.ClientIP}}</td>
+      <td><button type="button" class="btn link small">Xem</button></td>
+    </tr>
+    <tr class="inspector-detail-row" id="detail-{{.ID}}" hidden><td colspan="7"></td></tr>
+  {{else}}
+    <tr>
+      <td colspan="7" class="muted dock-empty">
+        Chưa có request nào của màn hình này. Hãy thao tác trên trang để quan sát!
+      </td>
+    </tr>
+  {{end}}
+{{end}}
+
+{{define "inspector_detail"}}
+{{with .Data.Record}}
+<div class="inline-detail">
+  <div class="inline-detail-head">
+    <div>
+      <strong>Request #{{.ID}}</strong>
+      <span class="badge-method badge-{{lower .Method}}">{{.Method}}</span>
+      <span class="{{statusClass .Status}}">{{.Status}}</span>
+      <span class="muted small">{{.TimeFormatted}} · {{.DurationFormatted}} · IP: {{.ClientIP}}</span>
+    </div>
+    <button type="button" class="btn link small detail-close">✕ Đóng</button>
+  </div>
+
+  <div class="detail-grid">
+    <div class="detail-item">
+      <label class="detail-label">URL đầy đủ</label>
+      <div class="mono detail-val detail-break">{{.FullPath}}</div>
+    </div>
+    <div class="detail-item">
+      <label class="detail-label">User Agent</label>
+      <div class="mono small detail-val detail-break">{{if .UserAgent}}{{.UserAgent}}{{else}}—{{end}}</div>
+    </div>
+  </div>
+
+  {{if $.Data.QueryList}}
+  <div class="detail-section">
+    <label class="detail-label">Query Parameters</label>
+    <table class="detail-table">
+      <thead><tr><th class="col-30">Tham số</th><th>Giá trị</th></tr></thead>
+      <tbody>
+        {{range $.Data.QueryList}}
+        <tr><td class="mono">{{.Key}}</td><td class="mono detail-break">{{.Value}}</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+
+  {{with $.Data.Source}}
+  <div class="detail-section">
+    <label class="detail-label">Code xử lý</label>
+    <div class="mono small detail-val">{{.Func}}{{if .File}} · <span class="muted">{{.File}}:{{.Line}}</span>{{end}}</div>
+    {{if .Middlewares}}<div class="detail-mw"><span class="muted small">Middleware:</span> {{range $i, $m := .Middlewares}}{{if $i}}<span class="muted"> → </span>{{end}}<code>{{$m}}</code>{{end}}</div>{{end}}
+    {{if not .ShowCode}}<div class="muted small">Hiển thị mã nguồn đang tắt (INSPECTOR_SHOW_SOURCE=false).</div>
+    {{else if .Code}}<pre class="mono detail-pre detail-code">{{.Code}}</pre>
+    {{else}}<div class="muted small">Không tìm thấy mã nguồn trên máy chủ này (chỉ hiện khi chạy cạnh source).</div>{{end}}
+  </div>
+  {{end}}
+
+  <div class="detail-section">
+    <label class="detail-label">Request Headers</label>
+    <table class="detail-table">
+      <thead><tr><th class="col-30">Header</th><th>Giá trị</th></tr></thead>
+      <tbody>
+        {{range $k, $v := .RequestHeaders}}
+        <tr><td class="mono">{{$k}}</td><td class="mono detail-break">{{$v}}</td></tr>
+        {{else}}
+        <tr><td colspan="2" class="muted">Không có header đặc biệt.</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+
+  {{if .RequestBody}}
+  <div class="detail-section">
+    <label class="detail-label">Request Body Payload</label>
+    <pre class="mono detail-pre">{{.RequestBody}}</pre>
+  </div>
+  {{end}}
+</div>
+{{end}}
+{{end}}

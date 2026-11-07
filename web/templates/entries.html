@@ -6,9 +6,8 @@
 </p>
 
 <form class="filters" hx-get="/admin/entries" hx-target="#table" hx-push-url="true"
-      hx-trigger="submit, keyup changed delay:400ms from:#q, change from:.flt">
+      hx-trigger="submit, change from:.flt">
   <input type="hidden" name="dir" value="{{if .Data.Asc}}asc{{else}}desc{{end}}">
-  <input id="q" name="q" value="{{.Data.Q}}" placeholder="Nhập SĐT hoặc URL đầy đủ để tìm chính xác" autocomplete="off">
   <select name="type" class="flt">
     <option value="">Mọi loại</option>
     <option value="phone" {{if eq .Data.Type "phone"}}selected{{end}}>Số điện thoại</option>
@@ -18,7 +17,6 @@
     <option value="">Mọi category</option>
     {{range $.Categories}}<option {{if eq . $.Data.Category}}selected{{end}}>{{.}}</option>{{end}}
   </select>
-  <button type="submit">Tìm</button>
   {{if .CanEdit}}
   <button type="button" class="primary" hx-get="/admin/entries/new" hx-target="#form-slot" hx-push-url="false">+ Thêm</button>{{end}}
 </form>

@@ -26,6 +26,7 @@ func newTestStore(t *testing.T) *Store {
 	}
 
 	t.Cleanup(s.Close)
+	s.SetSealer(newTestSealer(t))
 
 	// CHỐT AN TOÀN: test này TRUNCATE (xóa sạch) mọi bảng. Chỉ chạy trên database có tên kết thúc bằng
 	// "_test"; nếu lỡ trỏ TEST_DATABASE_URL vào DB thật (vd "vsf") thì dừng NGAY, chưa đụng gì tới dữ liệu.

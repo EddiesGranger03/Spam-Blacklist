@@ -94,8 +94,22 @@ go run ./cmd/bench -url http://127.0.0.1:8090 -key vsf_... -file data.csv -c 64 
 | `COOKIE_SECURE` | `false` | `true` khi chạy HTTPS |
 | `BOOTSTRAP_ADMIN_EMAIL/PASSWORD` | – | tạo admin đầu tiên khi bảng trống (mật khẩu ≥ 10 ký tự) |
 | `AUTH_DISABLED` | `false` | bỏ API key (chỉ dev + localhost) |
+| `INSPECTOR_SHOW_SOURCE` | `true` ở development, `false` ở production | Live Inspector hiện mã nguồn handler trong chi tiết request |
+| `AUDIT_HMAC_KEY` | (dẫn xuất từ `SESSION_SECRET`) | Khóa HMAC nối chuỗi hash cho `audit_logs`. Nên đặt riêng, vì đổi `SESSION_SECRET` sẽ làm không xác minh được bản ghi cũ. Kiểm tra bằng `GET /admin/audit/verify` (admin) |
+| `DATA_KEY` | **bắt buộc** | Bí mật ≥ 32 ký tự để mã hóa AES-256-GCM `value/note/source`. **Mất khóa = mất dữ liệu**, hãy sao lưu riêng khỏi DB |
+| `DATA_PEPPER` | **bắt buộc** | Bí mật ≥ 32 ký tự, khác `DATA_KEY`, dùng cho blind index HMAC (và `value_hash`) |
+| `DATA_KEY_VERSION` | `1` | Số phiên bản khóa, lưu cạnh mỗi bản mã để xoay khóa sau này |
 | `DEFAULT_REGION` | `VN` | mã quốc gia khi SĐT không có dấu `+` |
 | `BLOOM_EXPECTED_ITEMS` | `10000000` | kích thước Bloom tối thiểu (tự nới theo số dòng ước lượng ×1,3) |
 | `BLOOM_REBUILD_INTERVAL` | `24h` | dựng lại Bloom định kỳ |
 | `POLL_INTERVAL` | `1s` | tần suất đọc `change_log` |
 | `RATE_LIMIT_RPS` | `100` | giới hạn mặc định mỗi key |
+
+## Mã hóa dữ liệu lưu trữ
+
+- `blacklist_entries` không còn cột plaintext: `value_enc`, `note_enc`, `source_enc` là AES-256-GCM; tra cứu dùng `value_blind` = HMAC-SHA256(pepper, type|match_type|value); `value_hash` (khóa partition và Bloom filter) là 8 byte đầu của blind index nên không dò ngược được số điện thoại.
+- Mọi kiểu khớp (`exact`/`prefix`/`domain`) vẫn hoạt động vì checker chỉ so sánh bằng (đẳng thức) trên các candidate key.
+- Khóa nằm trong biến môi trường `DATA_KEY`, `DATA_PEPPER`. Với `start.bat`, đặt chúng trong file `.env.local.bat` (đã nằm trong `.gitignore`, không commit): `set DATA_KEY=...` và `set DATA_PEPPER=...`.
+- Lần khởi động đầu tiên sau khi nâng cấp tự chuyển bảng cũ sang bảng mã hóa trong **một transaction** (khoảng 15 giây cho ~1 triệu dòng): sao chép, xác minh số dòng và mẫu giải mã, rồi mới đổi tên bảng và xóa bảng plaintext. Lỗi bất kỳ thì rollback, bảng cũ còn nguyên. Hãy `pg_dump` trước khi nâng cấp.
+- Audit log, cache Redis và inspector đều không chứa giá trị gốc (che hoặc mã hóa).
+- Muốn đổi khóa: tăng `DATA_KEY_VERSION` (chưa có công cụ re-encrypt tự động, cần viết thêm trước khi xoay khóa thật).

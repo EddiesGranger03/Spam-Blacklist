@@ -22,14 +22,12 @@ func actorOf(id int64, email, ip string) model.Actor {
 type entriesData struct {
 	Entries   []model.Entry
 	NextURL   string
-	Q         string
 	Type      string
 	Category  string
 	Cursor    int64
 	Estimate  int64
 	BloomN    uint64
 	Ready     bool
-	SearchBad bool
 	Asc       bool
 	ToggleURL string
 }
@@ -50,7 +48,6 @@ type entryForm struct {
 func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	d := entriesData{
-		Q:        strings.TrimSpace(q.Get("q")),
 		Type:     q.Get("type"),
 		Category: q.Get("category"),
 		Asc:      q.Get("dir") == "asc",
@@ -67,10 +64,6 @@ func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 
 	link := func(dir string, after int64) string {
 		v := url.Values{"dir": {dir}}
-
-		if d.Q != "" {
-			v.Set("q", d.Q)
-		}
 
 		if d.Type != "" {
 			v.Set("type", d.Type)
@@ -103,26 +96,16 @@ func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 		Asc:      d.Asc,
 	}
 
-	if d.Q != "" {
-		f.Search = h.searchKeys(d.Q, d.Type)
-
-		if len(f.Search) == 0 {
-			d.SearchBad = true
-		}
+	entries, next, err := h.Store.ListEntries(r.Context(), f)
+	if err != nil {
+		h.serverError(w, r, err)
+		return
 	}
 
-	if !d.SearchBad {
-		entries, next, err := h.Store.ListEntries(r.Context(), f)
-		if err != nil {
-			h.serverError(w, r, err)
-			return
-		}
+	d.Entries = entries
 
-		d.Entries = entries
-
-		if next > 0 {
-			d.NextURL = link(thisDir, next)
-		}
+	if next > 0 {
+		d.NextURL = link(thisDir, next)
 	}
 
 	d.Estimate, _ = h.Store.EstimatedCount(r.Context())
@@ -135,24 +118,6 @@ func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, http.StatusOK, "entries", "layout", pd)
-}
-
-func (h *Handler) searchKeys(q, typ string) []normalize.Key {
-	types := []normalize.Type{normalize.TypePhone, normalize.TypeURL}
-
-	if typ != "" {
-		types = []normalize.Type{normalize.Type(typ)}
-	}
-
-	var keys []normalize.Key
-
-	for _, t := range types {
-		if _, ks, err := normalize.Candidates(t, q, h.Cfg.DefaultRegion); err == nil {
-			keys = append(keys, ks...)
-		}
-	}
-
-	return keys
 }
 
 func (h *Handler) renderForm(w http.ResponseWriter, r *http.Request, f entryForm) {

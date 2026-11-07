@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"vsf/internal/seal"
 )
 
 //go:embed migrations/*.sql
@@ -23,6 +25,9 @@ var (
 type Store struct {
 	write *pgxpool.Pool
 	read  *pgxpool.Pool
+
+	auditKey []byte
+	sealer   *seal.Sealer
 }
 
 func New(ctx context.Context, writeDSN, readDSN string, maxConns int) (*Store, error) {
@@ -152,7 +157,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 
-	return nil
+	return s.convertToSealed(ctx)
 }
 
 func isUniqueViolation(err error) bool {

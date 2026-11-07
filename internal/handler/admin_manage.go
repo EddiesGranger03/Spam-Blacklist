@@ -283,3 +283,14 @@ func (h *Handler) apiKeyRotate(w http.ResponseWriter, r *http.Request) {
 	h.APIKeys.Invalidate(old.Prefix)
 	h.renderAPIKeys(w, r, apiKeysData{NewKey: full, NewFor: old.Name + " (xoay từ #" + strconv.FormatInt(old.ID, 10) + ")"}, "")
 }
+
+// auditVerify walks the audit hash chain and reports the first broken row.
+func (h *Handler) auditVerify(w http.ResponseWriter, r *http.Request) {
+	res, err := h.Store.VerifyAuditChain(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, res)
+}

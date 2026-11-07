@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +27,21 @@ type Config struct {
 	BootstrapPass  string
 
 	AuthDisabled bool
+
+	// AuditKey is the HMAC key that chains audit_logs rows together. If empty,
+	// the store derives it from SessionSecret (rotating the secret then breaks
+	// verification of old rows, so a dedicated key is recommended).
+	AuditKey string
+
+	// DataKey and DataPepper protect blacklist data at rest (see internal/seal).
+	// Both are required. Losing either makes the stored data unreadable.
+	DataKey        string
+	DataPepper     string
+	DataKeyVersion int
+
+	// InspectorShowSource lets the live inspector show handler source code.
+	// Defaults to on in development and off in production.
+	InspectorShowSource bool
 
 	DefaultRegion string
 
@@ -56,6 +72,11 @@ func Load() (Config, error) {
 		PollInterval:         getenvDuration("POLL_INTERVAL", time.Second),
 		RateLimitRPS:         getenvInt("RATE_LIMIT_RPS", 100),
 	}
+	c.AuditKey = getenv("AUDIT_HMAC_KEY", "")
+	c.DataKey = getenv("DATA_KEY", "")
+	c.DataPepper = getenv("DATA_PEPPER", "")
+	c.DataKeyVersion = getenvInt("DATA_KEY_VERSION", 1)
+	c.InspectorShowSource = getenvBool("INSPECTOR_SHOW_SOURCE", c.AppEnv == "development")
 	return c, c.validate()
 }
 
@@ -80,6 +101,20 @@ func (c Config) validate() error {
 		if c.AuthDisabled {
 			return fmt.Errorf("AUTH_DISABLED is not allowed in production")
 		}
+
+		for name, dsn := range map[string]string{"DATABASE_URL": c.DatabaseURL, "READ_DATABASE_URL": c.ReadDatabaseURL} {
+			if dsn != "" && !dbTLSEnforced(dsn) {
+				return fmt.Errorf("%s must use sslmode=require, verify-ca or verify-full in production", name)
+			}
+		}
+	}
+
+	if len(c.DataKey) < 32 || len(c.DataPepper) < 32 {
+		return fmt.Errorf("DATA_KEY and DATA_PEPPER are required and must each be at least 32 characters")
+	}
+
+	if c.DataKey == c.DataPepper {
+		return fmt.Errorf("DATA_KEY and DATA_PEPPER must be different")
 	}
 
 	if c.AuthDisabled && !isLoopbackAddr(c.HTTPAddr) {
@@ -87,6 +122,31 @@ func (c Config) validate() error {
 	}
 
 	return nil
+}
+
+// dbTLSEnforced reports whether a Postgres DSN refuses plaintext connections.
+// libpq treats a missing sslmode as "prefer" (silent downgrade), so that fails too.
+func dbTLSEnforced(dsn string) bool {
+	mode := ""
+
+	if strings.Contains(dsn, "://") {
+		if u, err := url.Parse(dsn); err == nil {
+			mode = u.Query().Get("sslmode")
+		}
+	} else {
+		for _, kv := range strings.Fields(dsn) {
+			if v, ok := strings.CutPrefix(kv, "sslmode="); ok {
+				mode = v
+			}
+		}
+	}
+
+	switch mode {
+	case "require", "verify-ca", "verify-full":
+		return true
+	}
+
+	return false
 }
 
 func isLoopbackAddr(addr string) bool {

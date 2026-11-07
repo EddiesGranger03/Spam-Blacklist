@@ -40,7 +40,7 @@ func (s *Store) CreateAdmin(ctx context.Context, email, passwordHash string, rol
 		return model.Admin{}, err
 	}
 
-	if err := writeAudit(ctx, tx, actor, "user.create", 0, map[string]any{"email": a.Email, "role": a.Role}); err != nil {
+	if err := s.writeAudit(ctx, tx, actor, "user.create", 0, map[string]any{"email": a.Email, "role": a.Role}); err != nil {
 		return model.Admin{}, err
 	}
 
@@ -94,7 +94,7 @@ func (s *Store) UpdateAdmin(ctx context.Context, id int64, role model.Role, disa
 		return err
 	}
 
-	if err := writeAudit(ctx, tx, actor, "user.update", 0, map[string]any{"admin_id": id, "role": role, "disabled": disabled}); err != nil {
+	if err := s.writeAudit(ctx, tx, actor, "user.update", 0, map[string]any{"admin_id": id, "role": role, "disabled": disabled}); err != nil {
 		return err
 	}
 
@@ -180,7 +180,7 @@ func (s *Store) WriteAudit(ctx context.Context, a model.Actor, action string, de
 	}
 
 	defer tx.Rollback(ctx)
-	if err := writeAudit(ctx, tx, a, action, 0, detail); err != nil {
+	if err := s.writeAudit(ctx, tx, a, action, 0, detail); err != nil {
 		return err
 	}
 

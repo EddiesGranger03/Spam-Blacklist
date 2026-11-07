@@ -1,7 +1,4 @@
 {{define "entries_table"}}
-{{if .Data.SearchBad}}
-  <p class="muted">Từ khóa không phải SĐT/URL hợp lệ nên không có kết quả.</p>
-{{else}}
 <table>
   <thead><tr>
     <th><a href="{{.Data.ToggleURL}}" hx-get="{{.Data.ToggleURL}}" hx-target="#table" hx-push-url="true">ID {{if .Data.Asc}}▲{{else}}▼{{end}}</a></th><th>Loại</th><th>Cách khớp</th><th>Giá trị</th><th>Category</th><th>Risk</th>
@@ -31,7 +28,6 @@
   {{if gt .Data.Cursor 0}}<a href="/admin/entries">← Trang đầu</a>{{end}}
   {{if .Data.NextURL}}<button hx-get="{{.Data.NextURL}}" hx-target="#table" hx-push-url="true">Trang sau →</button>{{end}}
 </div>
-{{end}}
 {{end}}
 
 {{define "entry_form"}}
