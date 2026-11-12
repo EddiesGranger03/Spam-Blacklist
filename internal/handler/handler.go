@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -43,7 +45,8 @@ type Handler struct {
 	Deps
 	tmpl         map[string]*template.Template
 	throttleIP   *auth.Throttle
-	throttleUser *auth.Throttle
+	throttleUser *auth.Throttle // khóa theo cặp email|IP: người ngoài không khóa được tài khoản của người khác
+	throttleMail *auth.Throttle // giới hạn rộng theo email để chặn dò mật khẩu từ nhiều IP
 	jobs         *importJobs
 	cookieName   string
 	routeIndex   map[string]routeInfo
@@ -51,6 +54,7 @@ type Handler struct {
 
 var pageNames = []string{"login", "entries", "check", "import", "audit", "users", "apikeys"}
 
+// New tạo Handler từ các phụ thuộc: nạp template, khởi tạo throttle và bộ quản lý job import.
 func New(d Deps) (*Handler, error) {
 	if d.Log == nil {
 		d.Log = slog.Default()
@@ -65,6 +69,7 @@ func New(d Deps) (*Handler, error) {
 		tmpl:         map[string]*template.Template{},
 		throttleIP:   auth.NewThrottle(20, 15*time.Minute),
 		throttleUser: auth.NewThrottle(5, 15*time.Minute),
+		throttleMail: auth.NewThrottle(30, 15*time.Minute),
 		jobs:         newImportJobs(),
 		cookieName:   "vsf_session",
 	}
@@ -93,13 +98,14 @@ func New(d Deps) (*Handler, error) {
 	return h, nil
 }
 
+// Router dựng toàn bộ cây route (công khai, API, admin) cùng middleware tương ứng.
 func (h *Handler) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID, chimw.Recoverer, h.securityHeaders, h.instrument)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	r.Get("/readyz", h.readyz)
-	r.Handle("/metrics", promhttp.Handler())
+	r.Handle("/metrics", h.metricsAuth(promhttp.Handler()))
 
 	staticFS, _ := fs.Sub(web.FS, "static")
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServerFS(staticFS)))
@@ -173,6 +179,7 @@ func (h *Handler) Router() http.Handler {
 	return r
 }
 
+// readyz kiểm tra trạng thái sẵn sàng (Bloom, changefeed, DB) và trả 503 nếu chưa sẵn sàng.
 func (h *Handler) readyz(w http.ResponseWriter, r *http.Request) {
 	problems := map[string]string{}
 
@@ -184,31 +191,69 @@ func (h *Handler) readyz(w http.ResponseWriter, r *http.Request) {
 		problems["changefeed"] = fmt.Sprintf("last successful poll %s ago", lag.Truncate(time.Second))
 	}
 
+	// Các thay đổi đang chờ sau một transaction mở lâu đã có trong Bloom filter, nên riêng điều này không làm instance sai,
+	// và không được gạt nó khỏi load balancer: nó chỉ là cảnh báo. Chỉ khi đuôi bị tràn thì mới là vấn đề, vì khi đó entry có thể thật sự bị thiếu.
+	if h.Feed.TailOverflow() {
+		problems["changefeed_tail"] = "too many committed changes waiting behind an open database transaction; " +
+			"the Bloom filter may be missing entries"
+	}
+
+	warnings := map[string]string{}
+
+	if st := h.Feed.StalledFor(); st > stallWarnAfter {
+		warnings["changefeed_stalled"] = fmt.Sprintf("%d changes have been waiting %s behind an open database "+
+			"transaction (already applied to the Bloom filter); look for an idle-in-transaction session or a long import",
+			h.Feed.TailLen(), st.Truncate(time.Second))
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := h.Store.Ping(ctx); err != nil {
 		problems["database"] = "unreachable"
 	}
 
+	// Chi tiết lỗi nội bộ chỉ dành cho loopback; bên ngoài chỉ thấy trạng thái.
+	detail := false
+	if ip := net.ParseIP(peerIP(r)); ip != nil && ip.IsLoopback() {
+		detail = true
+	}
+
 	if len(problems) > 0 {
+		if !detail {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not ready"})
+			return
+		}
+
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not ready", "problems": problems})
+
+		return
+	}
+
+	if len(warnings) > 0 && detail {
+		writeJSON(w, 200, map[string]any{"status": "ready", "warnings": warnings})
 		return
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "ready"})
 }
 
+// stallWarnAfter là thời gian thay đổi được phép chờ sau một transaction mở trước khi /readyz nhắc tới.
+const stallWarnAfter = 30 * time.Second
+
+// writeJSON ghi phản hồi JSON với mã trạng thái cho trước.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeErr ghi phản hồi lỗi dạng JSON {"error": ...}.
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func clientIP(r *http.Request) string {
+// peerIP trả về IP của kết nối trực tiếp (bỏ phần cổng).
+func peerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -217,8 +262,78 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-func actorFrom(r *http.Request) model.Actor {
-	a := model.Actor{IP: clientIP(r)}
+// inNets cho biết IP có thuộc một trong các mạng đã cho hay không.
+func inNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// clientIP trả về IP client thật. Chỉ khi kết nối đến từ một proxy tin cậy (TRUSTED_PROXIES) mới đọc
+// X-Forwarded-For, duyệt từ phải sang trái và lấy hop đầu tiên không thuộc proxy tin cậy.
+// Header do client tự gửi không bao giờ được tin khi peer không nằm trong danh sách.
+func (h *Handler) clientIP(r *http.Request) string {
+	peer := peerIP(r)
+
+	trusted := h.Cfg.TrustedProxies
+	if len(trusted) == 0 {
+		return peer
+	}
+
+	pip := net.ParseIP(peer)
+	if pip == nil || !inNets(pip, trusted) {
+		return peer
+	}
+
+	var hops []string
+
+	for _, v := range r.Header.Values("X-Forwarded-For") {
+		for _, p := range strings.Split(v, ",") {
+			hops = append(hops, strings.TrimSpace(p))
+		}
+	}
+
+	for i := len(hops) - 1; i >= 0; i-- {
+		ip := net.ParseIP(hops[i])
+		if ip == nil {
+			return peer // header lỗi: không đoán
+		}
+
+		if !inNets(ip, trusted) {
+			return ip.String()
+		}
+	}
+
+	return peer
+}
+
+// metricsAuth bảo vệ /metrics: có METRICS_TOKEN thì cần Bearer đúng; không có thì chỉ nhận loopback.
+func (h *Handler) metricsAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tok := h.Cfg.MetricsToken; tok != "" {
+			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if got == r.Header.Get("Authorization") || subtle.ConstantTimeCompare([]byte(got), []byte(tok)) != 1 {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
+				writeErr(w, http.StatusUnauthorized, "unauthorized")
+
+				return
+			}
+		} else if ip := net.ParseIP(peerIP(r)); ip == nil || !ip.IsLoopback() {
+			writeErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// actorFrom tạo model.Actor cho audit từ IP và phiên đăng nhập hiện tại.
+func (h *Handler) actorFrom(r *http.Request) model.Actor {
+	a := model.Actor{IP: h.clientIP(r)}
 
 	if s := sessionFrom(r); s != nil {
 		a.ID, a.Email = s.AdminID, s.Email
@@ -248,6 +363,7 @@ var flashMessages = map[string]string{
 	"key_revoked": "Đã thu hồi API key.", "logged_out": "Bạn đã đăng xuất.",
 }
 
+// newPage dựng dữ liệu chung cho trang (tiêu đề, CSRF, quyền của người dùng).
 func (h *Handler) newPage(r *http.Request, title, active string, data any) pageData {
 	pd := pageData{Title: title, Active: active, Screen: r.URL.Path, ScreenName: title, Categories: model.Categories, Data: data,
 		Flash: flashMessages[r.URL.Query().Get("flash")]}
@@ -261,6 +377,7 @@ func (h *Handler) newPage(r *http.Request, title, active string, data any) pageD
 	return pd
 }
 
+// render hiển thị template của trang với mã trạng thái cho trước.
 func (h *Handler) render(w http.ResponseWriter, status int, page, name string, pd pageData) {
 	t, ok := h.tmpl[page]
 	if !ok {
@@ -280,10 +397,12 @@ func (h *Handler) render(w http.ResponseWriter, status int, page, name string, p
 	_, _ = w.Write(buf.Bytes())
 }
 
+// isHTMX cho biết request có phải từ HTMX hay không (dựa vào header HX-Request).
 func isHTMX(r *http.Request) bool {
 	return r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-History-Restore-Request") != "true"
 }
 
+// serverError ghi log lỗi và trả 500 cho client mà không lộ chi tiết.
 func (h *Handler) serverError(w http.ResponseWriter, r *http.Request, err error) {
 	h.Log.Error("request failed", "path", r.URL.Path, "method", r.Method, "err", err)
 	http.Error(w, "Lỗi hệ thống. Vui lòng thử lại.", http.StatusInternalServerError)

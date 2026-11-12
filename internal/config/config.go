@@ -1,15 +1,20 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
+// Config: Chứa toàn bộ cấu hình hệ thống được nạp từ biến môi trường.
 type Config struct {
 	AppEnv   string
 	HTTPAddr string
@@ -18,8 +23,20 @@ type Config struct {
 	ReadDatabaseURL string
 	PGMaxConns      int
 
-	RedisAddr string
-	CacheTTL  time.Duration
+	RedisAddr     string
+	RedisPassword string
+	CacheTTL      time.Duration
+
+	// TrustedProxies: các mạng (CIDR) của reverse proxy được phép khai báo IP client qua X-Forwarded-For.
+	// Rỗng = không tin header nào, dùng RemoteAddr.
+	TrustedProxies []*net.IPNet
+
+	// NoProxy: xác nhận rõ ràng là chạy không qua reverse proxy (TRUSTED_PROXIES_NONE=true).
+	// Ở production, phải đặt TRUSTED_PROXIES hoặc cờ này để tránh quên cấu hình.
+	NoProxy bool
+
+	// MetricsToken: bearer token cho /metrics. Rỗng = chỉ cho phép gọi từ loopback.
+	MetricsToken string
 
 	SessionSecret  string
 	CookieSecure   bool
@@ -28,19 +45,23 @@ type Config struct {
 
 	AuthDisabled bool
 
-	// AuditKey is the HMAC key that chains audit_logs rows together. If empty,
-	// the store derives it from SessionSecret (rotating the secret then breaks
-	// verification of old rows, so a dedicated key is recommended).
+	// AuditKey là khóa HMAC dùng để nối chuỗi hash cho bảng audit_logs.
+	// Nếu để rỗng, store sẽ tự dẫn xuất từ SessionSecret (khi đổi SessionSecret sẽ làm hỏng
+	// việc xác minh các bản ghi cũ, do đó nên đặt khóa riêng).
 	AuditKey string
 
-	// DataKey and DataPepper protect blacklist data at rest (see internal/seal).
-	// Both are required. Losing either makes the stored data unreadable.
+	// DataKey và DataPepper bảo vệ dữ liệu blacklist ở trạng thái lưu trữ (xem internal/seal).
+	// Cả hai đều bắt buộc. Mất một trong hai sẽ khiến dữ liệu đã lưu không thể đọc được.
 	DataKey        string
 	DataPepper     string
 	DataKeyVersion int
 
-	// InspectorShowSource lets the live inspector show handler source code.
-	// Defaults to on in development and off in production.
+	// DataKeysRetired lưu trữ các khóa cũ theo phiên bản tương ứng từ các biến DATA_KEY_V<n>.
+	// Chúng chỉ dùng để ĐỌC dữ liệu cũ chưa được re-encrypt; dữ liệu mới luôn mã hóa bằng DataKey ở DataKeyVersion.
+	DataKeysRetired map[int16]string
+
+	// InspectorShowSource cho phép Live Inspector hiển thị mã nguồn handler trong giao diện admin.
+	// Mặc định bật ở development và tắt ở production.
 	InspectorShowSource bool
 
 	DefaultRegion string
@@ -52,7 +73,13 @@ type Config struct {
 	RateLimitRPS int
 }
 
+// Load: Đọc cấu hình từ các biến môi trường, gán giá trị mặc định và kiểm tra tính hợp lệ.
 func Load() (Config, error) {
+	bloomItems := getenvInt("BLOOM_EXPECTED_ITEMS", 10_000_000)
+	if err := checkPositive("BLOOM_EXPECTED_ITEMS", bloomItems, math.MaxInt32); err != nil {
+		return Config{}, err
+	}
+
 	c := Config{
 		AppEnv:               getenv("APP_ENV", "development"),
 		HTTPAddr:             getenv("HTTP_ADDR", "127.0.0.1:8080"),
@@ -67,65 +94,178 @@ func Load() (Config, error) {
 		BootstrapPass:        getenv("BOOTSTRAP_ADMIN_PASSWORD", ""),
 		AuthDisabled:         getenvBool("AUTH_DISABLED", false),
 		DefaultRegion:        strings.ToUpper(getenv("DEFAULT_REGION", "VN")),
-		BloomExpectedItems:   uint64(getenvInt("BLOOM_EXPECTED_ITEMS", 10_000_000)),
+		BloomExpectedItems:   uint64(bloomItems), // #nosec G115 -- bloomItems đã được kiểm tra 1..MaxInt32 ở trên
 		BloomRebuildInterval: getenvDuration("BLOOM_REBUILD_INTERVAL", 24*time.Hour),
 		PollInterval:         getenvDuration("POLL_INTERVAL", time.Second),
 		RateLimitRPS:         getenvInt("RATE_LIMIT_RPS", 100),
+	}
+	c.RedisPassword = getenv("REDIS_PASSWORD", "")
+	c.MetricsToken = getenv("METRICS_TOKEN", "")
+
+	proxies, err := ParseCIDRs(getenv("TRUSTED_PROXIES", ""))
+	if err != nil {
+		return c, err
+	}
+
+	c.TrustedProxies = proxies
+	c.NoProxy = getenvBool("TRUSTED_PROXIES_NONE", false)
+	if err := checkPositive("PG_MAX_CONNS", c.PGMaxConns, 1000); err != nil {
+		return c, err
+	}
+	if err := checkPositive("RATE_LIMIT_RPS", c.RateLimitRPS, math.MaxInt32); err != nil {
+		return c, err
 	}
 	c.AuditKey = getenv("AUDIT_HMAC_KEY", "")
 	c.DataKey = getenv("DATA_KEY", "")
 	c.DataPepper = getenv("DATA_PEPPER", "")
 	c.DataKeyVersion = getenvInt("DATA_KEY_VERSION", 1)
 	c.InspectorShowSource = getenvBool("INSPECTOR_SHOW_SOURCE", c.AppEnv == "development")
+
+	retired, err := retiredDataKeys(os.Environ())
+	if err != nil {
+		return c, err
+	}
+
+	c.DataKeysRetired = retired
+
 	return c, c.validate()
 }
 
+// ParseCIDRs: đọc danh sách CIDR hoặc IP đơn, phân cách bằng dấu phẩy.
+func ParseCIDRs(list string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+
+	for _, item := range strings.Split(list, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+
+		if !strings.Contains(item, "/") {
+			ip := net.ParseIP(item)
+			if ip == nil {
+				return nil, fmt.Errorf("TRUSTED_PROXIES: %q không phải IP hoặc CIDR hợp lệ", item)
+			}
+
+			if ip.To4() != nil {
+				item += "/32"
+			} else {
+				item += "/128"
+			}
+		}
+
+		_, n, err := net.ParseCIDR(item)
+		if err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXIES: %q không phải IP hoặc CIDR hợp lệ", item)
+		}
+
+		out = append(out, n)
+	}
+
+	return out, nil
+}
+
+var retiredKeyVar = regexp.MustCompile(`^DATA_KEY_V(\d+)$`)
+
+// retiredDataKeys: Thu thập các biến môi trường dạng DATA_KEY_V<n> để nạp danh sách khóa cũ.
+func retiredDataKeys(environ []string) (map[int16]string, error) {
+	out := map[int16]string{}
+
+	for _, kv := range environ {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+
+		m := retiredKeyVar.FindStringSubmatch(strings.ToUpper(name))
+		if m == nil {
+			continue
+		}
+
+		n, err := strconv.Atoi(m[1])
+		if err != nil || n < 1 || n > math.MaxInt16 {
+			return nil, fmt.Errorf("%s: phiên bản khóa phải là số từ 1 đến %d", name, math.MaxInt16)
+		}
+
+		if value == "" {
+			continue // Biến rỗng tương đương với chưa thiết lập
+		}
+
+		if _, dup := out[int16(n)]; dup {  // #nosec G109 G115 -- n đã được kiểm tra 1..MaxInt16 ở đoạn trên
+			return nil, fmt.Errorf("%s bị khai báo hai lần", name)
+		}
+
+		out[int16(n)] = value  // #nosec G109 G115 -- n đã được kiểm tra 1..MaxInt16 ở đoạn trên
+	}
+
+	return out, nil
+}
+
+// validate: Kiểm tra tính hợp lệ và các ràng buộc bảo mật bắt buộc của toàn bộ cấu hình.
 func (c Config) validate() error {
 	if c.AppEnv != "development" && c.AppEnv != "production" {
-		return fmt.Errorf("APP_ENV must be development or production, got %q", c.AppEnv)
+		return fmt.Errorf("APP_ENV phải là development hoặc production, nhận được %q", c.AppEnv)
 	}
 
 	if c.SessionSecret == "" {
-		return fmt.Errorf("SESSION_SECRET is required")
+		return fmt.Errorf("SESSION_SECRET là bắt buộc")
 	}
 
 	if c.AppEnv == "production" {
 		if len(c.SessionSecret) < 32 {
-			return fmt.Errorf("SESSION_SECRET must be at least 32 characters in production")
+			return fmt.Errorf("SESSION_SECRET phải có ít nhất 32 ký tự ở môi trường production")
 		}
 
 		if !c.CookieSecure {
-			return fmt.Errorf("COOKIE_SECURE must be true in production")
+			return fmt.Errorf("COOKIE_SECURE phải là true ở môi trường production")
 		}
 
 		if c.AuthDisabled {
-			return fmt.Errorf("AUTH_DISABLED is not allowed in production")
+			return fmt.Errorf("AUTH_DISABLED không được phép bật ở môi trường production")
+		}
+
+		// Quên TRUSTED_PROXIES sau reverse proxy làm mọi client có chung IP của proxy
+		// (throttle đăng nhập và rate limit gộp chung), nên bắt buộc khai báo rõ ràng.
+		switch {
+		case len(c.TrustedProxies) == 0 && !c.NoProxy:
+			return fmt.Errorf("production yêu cầu đặt TRUSTED_PROXIES (CIDR của reverse proxy) hoặc TRUSTED_PROXIES_NONE=true nếu chạy không qua proxy")
+		case len(c.TrustedProxies) > 0 && c.NoProxy:
+			return fmt.Errorf("TRUSTED_PROXIES và TRUSTED_PROXIES_NONE=true mâu thuẫn nhau, chỉ đặt một trong hai")
 		}
 
 		for name, dsn := range map[string]string{"DATABASE_URL": c.DatabaseURL, "READ_DATABASE_URL": c.ReadDatabaseURL} {
 			if dsn != "" && !dbTLSEnforced(dsn) {
-				return fmt.Errorf("%s must use sslmode=require, verify-ca or verify-full in production", name)
+				return fmt.Errorf("%s bắt buộc phải sử dụng sslmode=require, verify-ca hoặc verify-full ở production", name)
 			}
 		}
 	}
 
+	// Token metrics quá ngắn dễ bị dò; rỗng vẫn hợp lệ (khi đó /metrics chỉ nhận loopback).
+	if c.MetricsToken != "" && len(c.MetricsToken) < 16 {
+		return fmt.Errorf("METRICS_TOKEN phải có ít nhất 16 ký tự (hoặc để rỗng để chỉ cho phép loopback)")
+	}
+
 	if len(c.DataKey) < 32 || len(c.DataPepper) < 32 {
-		return fmt.Errorf("DATA_KEY and DATA_PEPPER are required and must each be at least 32 characters")
+		return fmt.Errorf("DATA_KEY và DATA_PEPPER là bắt buộc và mỗi khóa phải có ít nhất 32 ký tự")
 	}
 
 	if c.DataKey == c.DataPepper {
-		return fmt.Errorf("DATA_KEY and DATA_PEPPER must be different")
+		return fmt.Errorf("DATA_KEY và DATA_PEPPER phải là hai chuỗi khác nhau")
+	}
+
+	// Phiên bản khóa được lưu dưới dạng SMALLINT trong DB: nếu vượt quá MaxInt16 sẽ bị cắt ngắn gây lỗi dữ liệu.
+	if c.DataKeyVersion < 1 || c.DataKeyVersion > math.MaxInt16 {
+		return fmt.Errorf("DATA_KEY_VERSION phải là số từ 1 đến %d, nhận được %d", math.MaxInt16, c.DataKeyVersion)
 	}
 
 	if c.AuthDisabled && !isLoopbackAddr(c.HTTPAddr) {
-		return fmt.Errorf("AUTH_DISABLED requires HTTP_ADDR bound to localhost, got %q", c.HTTPAddr)
+		return fmt.Errorf("AUTH_DISABLED yêu cầu HTTP_ADDR phải gắn vào localhost, nhận được %q", c.HTTPAddr)
 	}
 
 	return nil
 }
 
-// dbTLSEnforced reports whether a Postgres DSN refuses plaintext connections.
-// libpq treats a missing sslmode as "prefer" (silent downgrade), so that fails too.
+// dbTLSEnforced: Kiểm tra xem chuỗi kết nối Postgres (DSN) có bắt buộc dùng kết nối mã hóa TLS hay không.
 func dbTLSEnforced(dsn string) bool {
 	mode := ""
 
@@ -149,6 +289,7 @@ func dbTLSEnforced(dsn string) bool {
 	return false
 }
 
+// isLoopbackAddr: Kiểm tra xem địa chỉ IP/host được cấu hình có phải là localhost/loopback hay không.
 func isLoopbackAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || host == "" {
@@ -163,6 +304,16 @@ func isLoopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// checkPositive: Kiểm tra một cấu hình số nằm trong khoảng 1..max; báo lỗi nêu rõ tên biến khi sai.
+func checkPositive(name string, v, max int) error {
+	if v < 1 || v > max {
+		return fmt.Errorf("%s phải nằm trong khoảng 1 đến %d, nhận được %d", name, max, v)
+	}
+
+	return nil
+}
+
+// getenv: Lấy giá trị biến môi trường kiểu chuỗi, trả về giá trị mặc định nếu biến rỗng.
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -171,6 +322,7 @@ func getenv(key, def string) string {
 	return def
 }
 
+// getenvInt: Lấy giá trị biến môi trường kiểu số nguyên, trả về giá trị mặc định nếu không hợp lệ.
 func getenvInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -181,6 +333,7 @@ func getenvInt(key string, def int) int {
 	return def
 }
 
+// getenvBool: Lấy giá trị biến môi trường kiểu boolean, trả về giá trị mặc định nếu không hợp lệ.
 func getenvBool(key string, def bool) bool {
 	if v := os.Getenv(key); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -191,6 +344,7 @@ func getenvBool(key string, def bool) bool {
 	return def
 }
 
+// getenvDuration: Lấy giá trị biến môi trường kiểu thời lượng (time.Duration), trả về giá trị mặc định nếu không hợp lệ.
 func getenvDuration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
@@ -199,4 +353,27 @@ func getenvDuration(key string, def time.Duration) time.Duration {
 	}
 
 	return def
+}
+
+// Warnings: các cảnh báo cấu hình không chặn khởi động nhưng nên được người vận hành biết.
+func (c Config) Warnings() []string {
+	var out []string
+
+	if c.AppEnv == "production" && c.MetricsToken == "" {
+		out = append(out, "METRICS_TOKEN chưa đặt: /metrics chỉ nhận request từ loopback, hệ thống giám sát bên ngoài sẽ không thu thập được")
+	}
+
+	return out
+}
+
+// KeyFingerprint: vân tay ngắn (8 byte đầu của SHA-256, dạng hex) của một khóa để đối chiếu với nơi lưu khóa
+// mà không làm lộ khóa. Khóa rỗng trả về chuỗi rỗng.
+func KeyFingerprint(key string) string {
+	if key == "" {
+		return ""
+	}
+
+	sum := sha256.Sum256([]byte(key))
+
+	return hex.EncodeToString(sum[:8])
 }

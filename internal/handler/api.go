@@ -17,13 +17,16 @@ import (
 	"vsf/internal/normalize"
 )
 
+// requestIDKey trả về khóa context dùng để lưu request ID.
 func requestIDKey() any { return chimw.RequestIDKey }
 
+// apiKeyFrom lấy API key đã xác thực từ context của request.
 func apiKeyFrom(r *http.Request) *model.APIKey {
 	k, _ := r.Context().Value(apiKeyKey).(*model.APIKey)
 	return k
 }
 
+// apiAuth là middleware kiểm tra header X-API-Key; từ chối nếu thiếu hoặc sai key.
 func (h *Handler) apiAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h.Cfg.AuthDisabled {
@@ -39,13 +42,21 @@ func (h *Handler) apiAuth(next http.Handler) http.Handler {
 			}
 		}
 
-		k, err := h.APIKeys.Authenticate(r.Context(), raw)
+		k, err := h.APIKeys.Authenticate(r.Context(), raw, h.clientIP(r))
 		if err != nil {
 			switch {
 			case errors.Is(err, apikey.ErrMissing), errors.Is(err, apikey.ErrInvalid):
 				metrics.APIKeyRequests.WithLabelValues("none", "unauthorized").Inc()
 				w.Header().Set("WWW-Authenticate", `ApiKey realm="vsf"`)
 				writeErr(w, http.StatusUnauthorized, err.Error())
+
+			case errors.Is(err, apikey.ErrTooManyAuthAttempts):
+				// Cache-miss (prefix mới/lạ) từ IP này đã vượt giới hạn tra DB. Không lộ chi tiết
+				// "DB" ra ngoài; với client gửi đúng 1 key thật thì nhánh này gần như không bao giờ
+				// chạm tới vì key đã nằm trong cache. Xem docs/ATTACK_PUBLIC_API.md, finding A1.
+				metrics.APIKeyRequests.WithLabelValues("none", "auth_rate_limited").Inc()
+				w.Header().Set("Retry-After", "1")
+				writeErr(w, http.StatusTooManyRequests, err.Error())
 
 			case errors.Is(err, apikey.ErrRevoked):
 				metrics.APIKeyRequests.WithLabelValues("none", "revoked").Inc()
@@ -67,6 +78,7 @@ func (h *Handler) apiAuth(next http.Handler) http.Handler {
 	})
 }
 
+// limited kiểm tra giới hạn tốc độ của key cho số mục của request; trả false và ghi 429 nếu vượt.
 func (h *Handler) limited(w http.ResponseWriter, r *http.Request, units int) bool {
 	k := apiKeyFrom(r)
 	id := strconv.FormatInt(k.ID, 10)
@@ -95,13 +107,14 @@ func (h *Handler) limited(w http.ResponseWriter, r *http.Request, units int) boo
 	return true
 }
 
+// apiCheckOne xử lý GET /v1/check: kiểm tra một giá trị.
 func (h *Handler) apiCheckOne(w http.ResponseWriter, r *http.Request) {
 	if !h.limited(w, r, 1) {
 		return
 	}
 
 	q := r.URL.Query()
-	res, err := h.Checker.Check(r.Context(), normalize.Type(q.Get("type")), q.Get("value"))
+	res, err := h.Checker.CheckRegion(r.Context(), normalize.Type(q.Get("type")), q.Get("value"), q.Get("region"))
 	if err != nil {
 		if errors.Is(err, checker.ErrInvalidInput) {
 			writeErr(w, http.StatusBadRequest, err.Error())
@@ -116,11 +129,13 @@ func (h *Handler) apiCheckOne(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// apiCheckBatch xử lý POST /v1/check/batch: kiểm tra nhiều mục trong một request.
 func (h *Handler) apiCheckBatch(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	var req struct {
-		Items []checker.Item `json:"items"`
+		Items  []checker.Item `json:"items"`
+		Region string         `json:"region"` // mặc định cho các mục không tự khai báo region
 	}
 
 	dec := json.NewDecoder(r.Body)
@@ -138,6 +153,12 @@ func (h *Handler) apiCheckBatch(w http.ResponseWriter, r *http.Request) {
 
 	if !h.limited(w, r, len(req.Items)) {
 		return
+	}
+
+	for i := range req.Items {
+		if req.Items[i].Region == "" {
+			req.Items[i].Region = req.Region
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"results": h.Checker.CheckBatch(r.Context(), req.Items)})

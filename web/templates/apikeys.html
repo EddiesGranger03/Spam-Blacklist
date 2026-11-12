@@ -13,7 +13,8 @@
   <form method="post" action="/admin/apikeys" class="grid">
     <input type="hidden" name="csrf_token" value="{{.CSRF}}">
     <label>Tên (khách hàng / hệ thống) <input name="name" required maxlength="100"></label>
-    <label>Giới hạn tốc độ (request/giây) <input type="number" name="rps_limit" value="100" min="1" required></label>
+    <label>Giới hạn tốc độ (mục/giây — 1 lượt check = 1 mục, 1 lượt batch N mục = N mục) <input type="number" name="rps_limit" value="100" min="1" required></label>
+    <label>Cỡ batch tối đa (0 = bằng RPS; đặt tới 100 nếu khách hàng cần gửi batch lớn hơn RPS — tốc độ duy trì vẫn bị RPS chặn) <input type="number" name="max_batch" value="0" min="0" max="100"></label>
     <label>Hạn mức mỗi ngày (0 = không giới hạn) <input type="number" name="daily_quota" value="0" min="0" required></label>
     <label>Hết hạn sau (ngày, để trống = không) <input type="number" name="expires_days" min="1"></label>
     <div class="wide"><button type="submit" class="primary">Tạo key</button></div>
@@ -22,14 +23,14 @@
 </section>
 
 <table>
-  <thead><tr><th>ID</th><th>Tên</th><th>Prefix</th><th>Trạng thái</th><th>RPS</th><th>Quota/ngày</th><th>Hết hạn</th><th>Dùng lần cuối</th><th></th></tr></thead>
+  <thead><tr><th>ID</th><th>Tên</th><th>Prefix</th><th>Trạng thái</th><th>RPS</th><th>Batch tối đa</th><th>Quota/ngày</th><th>Hết hạn</th><th>Dùng lần cuối</th><th></th></tr></thead>
   <tbody>
   {{range .Data.Keys}}
     <tr>
       <td>{{.ID}}</td><td>{{.Name}}{{with .RotatedFrom}} <span class="muted small">(xoay từ #{{deref .}})</span>{{end}}</td>
       <td class="mono">{{.Prefix}}</td>
       <td>{{if eq .Status "active"}}<span class="tag ok">active</span>{{else}}<span class="tag warn">{{.Status}}</span>{{end}}</td>
-      <td>{{.RPSLimit}}</td><td>{{.DailyQuota}}</td>
+      <td>{{.RPSLimit}}</td><td>{{if .MaxBatch}}{{.MaxBatch}}{{else}}<span class="muted">= RPS</span>{{end}}</td><td>{{.DailyQuota}}</td>
       <td>{{if expired .ExpiresAt}}<span class="tag warn">đã hết hạn</span>{{else}}{{fmtTimePtr .ExpiresAt}}{{end}}</td>
       <td>{{fmtTimePtr .LastUsedAt}}</td>
       <td>

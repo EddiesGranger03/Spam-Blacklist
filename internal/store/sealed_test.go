@@ -13,6 +13,7 @@ import (
 	"vsf/internal/seal"
 )
 
+// newTestSealer tạo Sealer khóa A (phiên bản 1) dùng cho các test store.
 func newTestSealer(t *testing.T) *seal.Sealer {
 	t.Helper()
 
@@ -24,6 +25,7 @@ func newTestSealer(t *testing.T) *seal.Sealer {
 	return sl
 }
 
+// TestEntriesAreEncryptedAtRest kiểm tra dữ liệu lưu trữ là bản mã, không có bản rõ.
 func TestEntriesAreEncryptedAtRest(t *testing.T) {
 	s := newTestStore(t)
 	sl := s.sealer
@@ -39,7 +41,7 @@ func TestEntriesAreEncryptedAtRest(t *testing.T) {
 		t.Fatalf("returned entry must be decrypted: %+v", e)
 	}
 
-	// The plaintext columns are gone.
+	// Các cột bản rõ đã không còn.
 	var n int
 	if err := s.write.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
 		WHERE table_name='blacklist_entries' AND column_name IN ('value_normalized','note','source')`).Scan(&n); err != nil || n != 0 {
@@ -80,7 +82,7 @@ func TestEntriesAreEncryptedAtRest(t *testing.T) {
 		}
 	}
 
-	// Lookups work through the blind index and return decrypted data.
+	// Tra cứu hoạt động qua chỉ mục blind và trả về dữ liệu đã giải mã.
 	_, cands, _ := normalize.Candidates(normalize.TypePhone, "0901234567", "VN")
 
 	got, err := s.FindMatches(ctx, cands)
@@ -88,13 +90,14 @@ func TestEntriesAreEncryptedAtRest(t *testing.T) {
 		t.Fatalf("FindMatches = %+v, %v", got, err)
 	}
 
-	// Update re-encrypts note/source and keeps the row findable.
+	// Cập nhật mã hóa lại note/source và giữ dòng vẫn tìm được.
 	up, err := s.UpdateEntry(ctx, e.ID, model.EntryInput{Category: "scam", RiskScore: 80, Note: "moi", Source: "B"}, actor)
 	if err != nil || up.Note != "moi" || up.Source != "B" || up.Value != k.Value {
 		t.Fatalf("update = %+v, %v", up, err)
 	}
 }
 
+// TestWithoutSealerIsRefused kiểm tra store không có sealer thì từ chối ghi và đọc dữ liệu mã hóa.
 func TestWithoutSealerIsRefused(t *testing.T) {
 	s := newTestStore(t)
 	s.sealer = nil
@@ -125,6 +128,7 @@ const legacySchema = `
 	CREATE UNIQUE INDEX blacklist_entries_uniq ON blacklist_entries (value_hash, type, match_type, value_normalized);
 	CREATE INDEX blacklist_entries_id_idx ON blacklist_entries (id);`
 
+// TestConvertLegacyTableToSealed kiểm tra chuyển bảng plaintext cũ sang bảng mã hóa.
 func TestConvertLegacyTableToSealed(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -166,7 +170,7 @@ func TestConvertLegacyTableToSealed(t *testing.T) {
 		t.Fatalf("data changed by conversion: %+v", got[0])
 	}
 
-	// Lookups use the blind index, including domain/prefix candidates.
+	// Tra cứu dùng chỉ mục blind, kể cả các ứng viên domain/prefix.
 	_, cands, _ := normalize.Candidates(normalize.TypeURL, "http://www.evil.example/login/x", "VN")
 
 	m, err := s.FindMatches(ctx, cands)
@@ -191,7 +195,7 @@ func TestConvertLegacyTableToSealed(t *testing.T) {
 		t.Errorf("old audit row still has plaintext: %s", detail)
 	}
 
-	// New rows keep working and the sequence continued from the old ids.
+	// Dòng mới vẫn hoạt động và sequence tiếp tục từ id cũ.
 	k := mustKey(t, normalize.TypePhone, normalize.MatchExact, "0922222222")
 
 	e, err := s.CreateEntry(ctx, k, model.EntryInput{Category: "spam", RiskScore: 1}, actor)
@@ -199,12 +203,13 @@ func TestConvertLegacyTableToSealed(t *testing.T) {
 		t.Fatalf("CreateEntry after convert: %+v, %v", e, err)
 	}
 
-	// A second Migrate is a no-op.
+	// Migrate lần hai là no-op.
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
 
+// TestScrubAuditDetail kiểm tra việc che giá trị trong chi tiết audit.
 func TestScrubAuditDetail(t *testing.T) {
 	raw, changed := scrubAuditDetail(`{"before":{"value":"+84901234567","note":"n","source":"s"},"after":{"value":"+84901234567","note":"","source":"s"}}`)
 	if !changed || strings.Contains(string(raw), "84901234567") || strings.Contains(string(raw), `"n"`) {

@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+// TestNoFalseNegativesAndLowFalsePositives kiểm tra không bỏ sót hash nào và tỉ lệ dương giả thấp.
 func TestNoFalseNegativesAndLowFalsePositives(t *testing.T) {
 	const n = 100_000
 	f := New(n)
@@ -37,6 +38,7 @@ func TestNoFalseNegativesAndLowFalsePositives(t *testing.T) {
 	}
 }
 
+// TestConcurrentAddTest kiểm tra thêm và kiểm tra đồng thời không gây lỗi chạy đua.
 func TestConcurrentAddTest(t *testing.T) {
 	f := New(10_000)
 	var wg sync.WaitGroup
@@ -61,6 +63,7 @@ func TestConcurrentAddTest(t *testing.T) {
 	wg.Wait()
 }
 
+// TestManagerNotReadyIsConservative kiểm tra Manager chưa sẵn sàng thì trả lời an toàn (có thể có).
 func TestManagerNotReadyIsConservative(t *testing.T) {
 	m := NewManager()
 	if m.Ready() {
@@ -72,6 +75,7 @@ func TestManagerNotReadyIsConservative(t *testing.T) {
 	}
 }
 
+// TestRebuildKeepsHashesAddedDuringScan kiểm tra hash thêm trong lúc quét vẫn còn sau khi dựng lại.
 func TestRebuildKeepsHashesAddedDuringScan(t *testing.T) {
 	m := NewManager()
 	err := m.Rebuild(context.Background(), 1000, func(ctx context.Context, emit func(uint64)) error {
@@ -95,6 +99,7 @@ func TestRebuildKeepsHashesAddedDuringScan(t *testing.T) {
 	}
 }
 
+// TestRebuildFailureKeepsOldFilter kiểm tra dựng lại thất bại thì filter cũ vẫn được giữ.
 func TestRebuildFailureKeepsOldFilter(t *testing.T) {
 	m := NewManager()
 	_ = m.Rebuild(context.Background(), 1000, func(ctx context.Context, emit func(uint64)) error {
@@ -113,6 +118,7 @@ func TestRebuildFailureKeepsOldFilter(t *testing.T) {
 	}
 }
 
+// TestConcurrentRebuildRejected kiểm tra không cho dựng lại song song hai lần.
 func TestConcurrentRebuildRejected(t *testing.T) {
 	m := NewManager()
 	started, release := make(chan struct{}), make(chan struct{})

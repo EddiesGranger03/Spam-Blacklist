@@ -13,6 +13,7 @@ import (
 	"vsf/internal/model"
 )
 
+// TestInspector_Endpoints kiểm tra các endpoint của Inspector trả về đúng.
 func TestInspector_Endpoints(t *testing.T) {
 	ins := inspector.New(50)
 
@@ -121,6 +122,7 @@ func TestInspector_Endpoints(t *testing.T) {
 	}
 }
 
+// TestInspector_DetailShowsHandlerSource kiểm tra chi tiết request hiện mã nguồn handler.
 func TestInspector_DetailShowsHandlerSource(t *testing.T) {
 	ins := inspector.New(10)
 	h, err := New(Deps{Cfg: config.Config{InspectorShowSource: true}, Inspector: ins})
@@ -150,6 +152,7 @@ func TestInspector_DetailShowsHandlerSource(t *testing.T) {
 	}
 }
 
+// TestInspector_DetailMiddlewareAndSourceToggle kiểm tra bật/tắt hiện mã nguồn và chuỗi middleware.
 func TestInspector_DetailMiddlewareAndSourceToggle(t *testing.T) {
 	for _, show := range []bool{true, false} {
 		ins := inspector.New(10)

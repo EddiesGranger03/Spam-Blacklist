@@ -1,12 +1,9 @@
-﻿# HƯỚNG DẪN TỰ CODE: Spam Blacklist (SĐT + URL) bằng Go
+﻿# Spam Blacklist (SĐT + URL) bằng Go
 
-> Bạn tự code, mình chỉ hướng dẫn. Mỗi bước có: **Mục tiêu → File → Làm gì → Cạm bẫy → Cách kiểm tra**.
-> Làm tuần tự từ Bước 0 đến 9. Xong bước nào hãy chạy kiểm tra của bước đó rồi mới sang bước tiếp.
-> Khi kẹt hoặc muốn mình review code, dán đoạn code/lỗi vào chat.
 
 ---
 
-## 0. Khái niệm cần nắm trước (đọc 15 phút)
+## 0. Khái niệm cần nắm trước 
 
 | Khái niệm | Hiểu đơn giản | Dùng ở đâu |
 |---|---|---|
@@ -28,7 +25,7 @@ input → normalize → sinh danh sách key ứng viên → Bloom (loại key ch
 
 ---
 
-## Bước 0 — Chuẩn bị môi trường (đã xong một phần)
+## Bước 0 — Chuẩn bị môi trường 
 
 Đã có sẵn: `go.mod` (module `vsf`), các thư mục rỗng. Máy bạn có Go 1.27 và Docker.
 
@@ -94,7 +91,7 @@ Runner migration (`internal/store/store.go`): dùng `//go:embed migrations/*.sql
 
 ---
 
-## Bước 3 — Normalize (`internal/normalize/`) ← QUAN TRỌNG NHẤT, làm kỹ, viết test trước
+## Bước 3 — Normalize (`internal/normalize/`) 
 
 ### 3.1 `key.go`
 ```go
@@ -192,9 +189,9 @@ WHERE e.expires_at IS NULL OR e.expires_at > now()
 
 ---
 
-## Bước 6 — Bloom filter + Changefeed (phần "ăn tiền")
+## Bước 6 — Bloom filter + Changefeed
 
-### 6.1 `internal/bloom/bloom.go` — tự viết, chỉ ~50 dòng
+### 6.1 `internal/bloom/bloom.go`
 ```go
 type Filter struct { bits []uint64; m uint64; k uint64 }
 func New(expectedItems uint64) *Filter   // m = expectedItems*10 bit (làm tròn lên bội của 64), k = 7
@@ -401,7 +398,7 @@ Secrets qua biến môi trường/secret manager; TLS ở LB; chạy container n
 
 ---
 
-## Bước 13 — Benchmark (phải đo trước khi cam kết số)
+## Bước 13 — Benchmark 
 
 Không đưa ra con số RPS/latency khi chưa đo trên phần cứng mục tiêu. Quy trình:
 1. **Dữ liệu:** sinh 10M → 100M → (nếu hạ tầng cho phép) 300M bản ghi, nạp bằng chính chức năng import. Ghi lại thời gian import, kích thước bảng + index, RAM của Bloom.
@@ -423,6 +420,3 @@ Không đưa ra con số RPS/latency khi chưa đo trên phần cứng mục ti�
 - [ ] RBAC: viewer không ghi được; editor không vào được users/apikeys. CSRF: POST thiếu token → 403.
 - [ ] Import 1M dòng báo đúng mới/cập nhật/lỗi. Audit log ghi đủ mọi thao tác.
 - [ ] Benchmark báo cáo theo Bước 13.
-
-## Thứ tự gợi ý để có bản chạy sớm (MVP)
-Bước 0 → 1 → 2 (bảng entries, change_log) → 3 → 4 → 5 (Create/Find/Delete) → 6 → 7 → 8 (check + API key cơ bản) → thử `curl`. Sau đó: 9–10 (portal, session, RBAC, CSRF), rồi import/audit, metrics, 12–13.

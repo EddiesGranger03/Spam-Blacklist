@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// TestInspector_RecordAndGetRecent kiểm tra ghi và đọc lại các bản ghi gần nhất.
 func TestInspector_RecordAndGetRecent(t *testing.T) {
 	ins := New(10)
 
@@ -72,6 +73,7 @@ func TestInspector_RecordAndGetRecent(t *testing.T) {
 	}
 }
 
+// TestExtractHeaders kiểm tra việc chọn header để hiển thị.
 func TestExtractHeaders(t *testing.T) {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
@@ -90,6 +92,7 @@ func TestExtractHeaders(t *testing.T) {
 	}
 }
 
+// TestInspector_ScreenScope kiểm tra thống kê và lọc theo màn hình.
 func TestInspector_ScreenScope(t *testing.T) {
 	ins := New(10)
 	ins.Record(Record{Time: time.Now(), Method: "GET", Path: "/admin/entries", Screen: "/admin/entries", Status: 200})
@@ -115,6 +118,7 @@ func TestInspector_ScreenScope(t *testing.T) {
 	}
 }
 
+// TestScreenOf kiểm tra xác định màn hình của request (HTMX dùng trang gọi nó).
 func TestScreenOf(t *testing.T) {
 	plain := httptest.NewRequest("GET", "/admin/check", nil)
 	plain.Header.Set("Referer", "http://x/admin/entries")
@@ -137,6 +141,7 @@ func TestScreenOf(t *testing.T) {
 	}
 }
 
+// TestRedactBody kiểm tra che thông tin nhạy cảm trong body.
 func TestRedactBody(t *testing.T) {
 	if got := RedactBody("/admin/login", "email=a@b.c&password=hunter2"); strings.Contains(got, "hunter2") {
 		t.Errorf("login body leaked: %q", got)
@@ -155,6 +160,7 @@ func TestRedactBody(t *testing.T) {
 	}
 }
 
+// TestMaskSensitive kiểm tra che số điện thoại và URL trong chuỗi.
 func TestMaskSensitive(t *testing.T) {
 	cases := map[string]string{
 		"type=phone&value=0901234567":      "type=phone&value=090***",
@@ -174,5 +180,21 @@ func TestMaskSensitive(t *testing.T) {
 	rec := ins.GetRecent(1, "", "", "", "")[0]
 	if strings.Contains(rec.Query, "1234567") {
 		t.Errorf("inspector stored full phone number: %q", rec.Query)
+	}
+}
+
+// M5: body JSON của /v1/check/batch mang giá trị đang kiểm tra trong trường "value"; không được lưu nguyên văn.
+func TestRedactBodyMasksJSONValues(t *testing.T) {
+	body := `{"items":[{"type":"url","value":"http://evil.example/steal?x=1"},{"type":"phone","value":"0901234567"},{"type":"url","value":"a\"b-secret"}]}`
+	got := RedactBody("/v1/check/batch", body)
+
+	for _, leak := range []string{"evil.example", "steal", "01234567", "secret"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("leaked %q in %s", leak, got)
+		}
+	}
+
+	if !strings.Contains(got, `"type":"url"`) || !strings.Contains(got, `"value":"htt***"`) {
+		t.Errorf("structure/prefix lost: %s", got)
 	}
 }

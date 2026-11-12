@@ -15,6 +15,7 @@ import (
 	"vsf/internal/store"
 )
 
+// actorOf tạo model.Actor từ ID, email và IP của admin (dùng để ghi audit).
 func actorOf(id int64, email, ip string) model.Actor {
 	return model.Actor{ID: id, Email: email, IP: ip}
 }
@@ -45,6 +46,7 @@ type entryForm struct {
 	Error     string
 }
 
+// listEntries hiển thị danh sách entry theo bộ lọc và trang.
 func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	d := entriesData{
@@ -120,6 +122,7 @@ func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 	h.render(w, http.StatusOK, "entries", "layout", pd)
 }
 
+// renderForm hiển thị lại form entry kèm lỗi (dùng khi nhập sai).
 func (h *Handler) renderForm(w http.ResponseWriter, r *http.Request, f entryForm) {
 	if !isHTMX(r) {
 		http.Redirect(w, r, "/admin/entries", http.StatusSeeOther)
@@ -130,10 +133,12 @@ func (h *Handler) renderForm(w http.ResponseWriter, r *http.Request, f entryForm
 	h.render(w, http.StatusOK, "entries", "entry_form", pd)
 }
 
+// newEntryForm hiển thị form thêm entry mới.
 func (h *Handler) newEntryForm(w http.ResponseWriter, r *http.Request) {
 	h.renderForm(w, r, entryForm{Type: "phone", RiskScore: 50, Category: "spam"})
 }
 
+// parseEntryForm đọc và kiểm tra dữ liệu form thành entry nhập liệu.
 func parseEntryForm(r *http.Request) (entryForm, model.EntryInput, error) {
 	if err := r.ParseForm(); err != nil {
 		return entryForm{}, model.EntryInput{}, errors.New("dữ liệu form không hợp lệ")
@@ -164,6 +169,7 @@ func parseEntryForm(r *http.Request) (entryForm, model.EntryInput, error) {
 	return f, in, nil
 }
 
+// createEntry tạo một entry mới từ form, ghi audit rồi chuyển hướng.
 func (h *Handler) createEntry(w http.ResponseWriter, r *http.Request) {
 	f, in, err := parseEntryForm(r)
 	if err != nil {
@@ -179,7 +185,7 @@ func (h *Handler) createEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.Store.CreateEntry(r.Context(), key, in, actorFrom(r)); err != nil {
+	if _, err := h.Store.CreateEntry(r.Context(), key, in, h.actorFrom(r)); err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
 			f.Error = "Giá trị này đã có trong blacklist."
 			h.renderForm(w, r, f)
@@ -195,11 +201,13 @@ func (h *Handler) createEntry(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// entryID lấy ID entry từ đường dẫn; trả false nếu không hợp lệ.
 func entryID(r *http.Request) (int64, bool) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	return id, err == nil && id > 0
 }
 
+// editEntryForm hiển thị form sửa một entry.
 func (h *Handler) editEntryForm(w http.ResponseWriter, r *http.Request) {
 	id, ok := entryID(r)
 	if !ok {
@@ -226,6 +234,7 @@ func (h *Handler) editEntryForm(w http.ResponseWriter, r *http.Request) {
 	h.renderForm(w, r, f)
 }
 
+// updateEntry cập nhật một entry từ form.
 func (h *Handler) updateEntry(w http.ResponseWriter, r *http.Request) {
 	id, ok := entryID(r)
 	if !ok {
@@ -242,7 +251,7 @@ func (h *Handler) updateEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.Store.UpdateEntry(r.Context(), id, in, actorFrom(r)); err != nil {
+	if _, err := h.Store.UpdateEntry(r.Context(), id, in, h.actorFrom(r)); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			http.NotFound(w, r)
 			return
@@ -257,6 +266,7 @@ func (h *Handler) updateEntry(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteEntry xóa một entry và ghi audit.
 func (h *Handler) deleteEntry(w http.ResponseWriter, r *http.Request) {
 	id, ok := entryID(r)
 	if !ok {
@@ -264,7 +274,7 @@ func (h *Handler) deleteEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Store.DeleteEntry(r.Context(), id, actorFrom(r)); err != nil {
+	if err := h.Store.DeleteEntry(r.Context(), id, h.actorFrom(r)); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -278,12 +288,14 @@ func (h *Handler) deleteEntry(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// afterWrite đồng bộ changefeed ngay sau khi ghi entry để thay đổi có hiệu lực tức thì.
 func (h *Handler) afterWrite(r *http.Request) {
 	if err := h.Feed.SyncNow(r.Context()); err != nil {
 		h.Log.Error("sync after write", "err", err)
 	}
 }
 
+// userMessage đổi lỗi thành thông báo ngắn gọn để hiển thị cho người dùng.
 func userMessage(err error) string {
 	return strings.TrimPrefix(err.Error(), normalize.ErrInvalid.Error()+": ")
 }
@@ -295,10 +307,12 @@ type checkData struct {
 	Err    string
 }
 
+// checkPage hiển thị trang kiểm tra một giá trị.
 func (h *Handler) checkPage(w http.ResponseWriter, r *http.Request) {
 	h.render(w, http.StatusOK, "check", "layout", h.newPage(r, "Check thử", "check", checkData{Type: "phone"}))
 }
 
+// checkSubmit xử lý form kiểm tra và hiển thị kết quả.
 func (h *Handler) checkSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)

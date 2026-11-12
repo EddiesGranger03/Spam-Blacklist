@@ -2,6 +2,8 @@ module vsf
 
 go 1.26.0
 
+toolchain go1.27.4
+
 require (
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/go-chi/chi/v5 v5.5.0
@@ -9,8 +11,8 @@ require (
 	github.com/nyaruka/phonenumbers v1.8.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/redis/go-redis/v9 v9.23.0
-	golang.org/x/crypto v0.58.0
-	golang.org/x/net v0.60.0
+	golang.org/x/crypto v0.58.1-0.20261009181718-2f1f834330b2
+	golang.org/x/net v0.62.0
 	golang.org/x/sync v0.24.0
 	golang.org/x/time v0.16.0
 )

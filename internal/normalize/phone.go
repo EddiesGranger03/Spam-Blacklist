@@ -6,6 +6,7 @@ import (
 	"github.com/nyaruka/phonenumbers"
 )
 
+// Phone chuẩn hóa số điện thoại về dạng E.164, dùng region khi số không có dấu '+'.
 func Phone(raw, region string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

@@ -32,6 +32,7 @@ type queryParam struct {
 	Value string
 }
 
+// inspectorFeed trả về danh sách request mới nhất cho Inspector (dạng HTMX).
 func (h *Handler) inspectorFeed(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	d := inspectorFeedData{
@@ -49,12 +50,14 @@ func (h *Handler) inspectorFeed(w http.ResponseWriter, r *http.Request) {
 	h.render(w, http.StatusOK, "inspector", "inspector_rows", pd)
 }
 
+// inspectorStats trả về số liệu thống kê của Inspector cho một màn hình.
 func (h *Handler) inspectorStats(w http.ResponseWriter, r *http.Request) {
 	stats := h.Inspector.GetStats(r.URL.Query().Get("inspector_screen"))
 	pd := h.newPage(r, "Live Inspector Stats", "inspector", stats)
 	h.render(w, http.StatusOK, "inspector", "inspector_stats", pd)
 }
 
+// inspectorDetail hiển thị chi tiết một request, gồm mã nguồn handler nếu được bật.
 func (h *Handler) inspectorDetail(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
@@ -98,10 +101,12 @@ func (h *Handler) inspectorDetail(w http.ResponseWriter, r *http.Request) {
 	h.render(w, http.StatusOK, "inspector", "inspector_detail", pd)
 }
 
+// inspectorCloseDetail đóng khung chi tiết request.
 func (h *Handler) inspectorCloseDetail(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// inspectorClear xóa toàn bộ bản ghi của Inspector.
 func (h *Handler) inspectorClear(w http.ResponseWriter, r *http.Request) {
 	h.Inspector.Clear()
 	d := inspectorFeedData{
@@ -112,6 +117,7 @@ func (h *Handler) inspectorClear(w http.ResponseWriter, r *http.Request) {
 	h.render(w, http.StatusOK, "inspector", "inspector_rows", pd)
 }
 
+// inspectorPage hiển thị trang Live Inspector.
 func (h *Handler) inspectorPage(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/entries", http.StatusSeeOther)
 }

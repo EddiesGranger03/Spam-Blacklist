@@ -16,11 +16,11 @@ import (
 	"vsf/internal/model"
 )
 
-// auditLockID serialises audit writes so the chain has a single, gap-free order.
+// auditLockID tuần tự hóa việc ghi audit để chuỗi có thứ tự duy nhất, không có khoảng trống.
 const auditLockID = 727275
 
-// AuditKeyFrom returns the HMAC key for the audit chain: the dedicated key if
-// configured, otherwise one derived from the session secret.
+// AuditKeyFrom trả về khóa HMAC cho chuỗi audit: khóa riêng nếu được cấu hình,
+// nếu không thì khóa dẫn xuất từ session secret.
 func AuditKeyFrom(auditKey, sessionSecret string) []byte {
 	if auditKey != "" {
 		return []byte(auditKey)
@@ -30,7 +30,7 @@ func AuditKeyFrom(auditKey, sessionSecret string) []byte {
 	return sum[:]
 }
 
-// SetAuditKey enables hash chaining for audit rows written from now on.
+// SetAuditKey bật nối chuỗi hash cho các dòng audit được ghi từ thời điểm này.
 func (s *Store) SetAuditKey(key []byte) { s.auditKey = key }
 
 type auditFields struct {
@@ -44,6 +44,7 @@ type auditFields struct {
 	CreatedAt  time.Time
 }
 
+// optInt chuyển con trỏ số nguyên thành chuỗi byte để đưa vào hash audit (nil thì ghi dấu '-').
 func optInt(v *int64) []byte {
 	if v == nil {
 		return []byte("-")
@@ -52,8 +53,8 @@ func optInt(v *int64) []byte {
 	return []byte(strconv.FormatInt(*v, 10))
 }
 
-// auditHash is HMAC-SHA256 over prev and every field. Each part is length
-// prefixed so field boundaries cannot be shifted to forge a collision.
+// auditHash là HMAC-SHA256 trên prev và mọi trường. Mỗi phần được đặt độ dài trước
+// để ranh giới giữa các trường không thể bị dịch chuyển nhằm tạo va chạm giả.
 func auditHash(key, prev []byte, f auditFields) []byte {
 	m := hmac.New(sha256.New, key)
 
@@ -77,6 +78,7 @@ func auditHash(key, prev []byte, f auditFields) []byte {
 	return m.Sum(nil)
 }
 
+// writeAudit ghi một dòng audit trong transaction đã cho, có nối chuỗi hash nếu đã bật khóa audit.
 func (s *Store) writeAudit(ctx context.Context, tx pgx.Tx, a model.Actor, action string, entryID int64, detail any) error {
 	raw, err := json.Marshal(detail)
 	if err != nil {
@@ -127,7 +129,7 @@ func (s *Store) writeAudit(ctx context.Context, tx pgx.Tx, a model.Actor, action
 	return err
 }
 
-// AuditVerifyResult is the outcome of walking the whole chain.
+// AuditVerifyResult là kết quả khi duyệt toàn bộ chuỗi audit.
 type AuditVerifyResult struct {
 	OK       bool   `json:"ok"`
 	Checked  int64  `json:"checked"`   // rows whose hash verified
@@ -136,9 +138,9 @@ type AuditVerifyResult struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-// VerifyAuditChain recomputes every hash in id order. It detects edited rows,
-// deleted or inserted rows in the middle of the chain, and stripped hashes.
-// Truncation at the very end of the table cannot be detected by a chain alone.
+// VerifyAuditChain tính lại mọi hash theo thứ tự id. Hàm phát hiện dòng bị sửa,
+// dòng bị xóa hoặc chèn ở giữa chuỗi, và hash bị gỡ bỏ.
+// Việc cắt bớt ở cuối bảng không thể phát hiện chỉ bằng chuỗi hash.
 func (s *Store) VerifyAuditChain(ctx context.Context) (AuditVerifyResult, error) {
 	if len(s.auditKey) == 0 {
 		return AuditVerifyResult{}, errors.New("audit key is not configured")

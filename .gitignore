@@ -12,6 +12,7 @@ bin/
 # Local IDE and editor settings
 .vscode/
 .idea/
+.claude/
 
 # Environment / Secrets
 .env

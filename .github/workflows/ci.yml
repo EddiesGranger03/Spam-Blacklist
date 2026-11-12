@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # Postgres và Redis thật: các test store, handler và cmd/* chạy trên DB thật, không mock.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vsf
+          POSTGRES_PASSWORD: vsf
+          POSTGRES_DB: vsf_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vsf -d vsf_test"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      # Các test dùng chung DB vsf_test nên chạy tuần tự (-p 1); mỗi gói tự tạo DB tạm riêng khi cần.
+      TEST_DATABASE_URL: postgres://vsf:vsf@localhost:5432/vsf_test?sslmode=disable
+      TEST_REDIS_ADDR: localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -count=1 -p 1 ./...

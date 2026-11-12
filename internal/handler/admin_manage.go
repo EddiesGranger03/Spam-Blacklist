@@ -12,6 +12,7 @@ import (
 
 	"vsf/internal/apikey"
 	"vsf/internal/auth"
+	"vsf/internal/checker"
 	"vsf/internal/model"
 	"vsf/internal/store"
 )
@@ -21,6 +22,7 @@ type auditData struct {
 	NextURL string
 }
 
+// auditPage hiển thị trang nhật ký audit.
 func (h *Handler) auditPage(w http.ResponseWriter, r *http.Request) {
 	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
 	logs, next, err := h.Store.ListAudit(r.Context(), before, 50)
@@ -52,10 +54,12 @@ type usersData struct {
 
 var allRoles = []model.Role{model.RoleViewer, model.RoleEditor, model.RoleAdmin}
 
+// usersPage hiển thị trang quản lý người dùng.
 func (h *Handler) usersPage(w http.ResponseWriter, r *http.Request) {
 	h.renderUsers(w, r, http.StatusOK, "")
 }
 
+// renderUsers hiển thị lại trang người dùng kèm trạng thái và thông báo lỗi.
 func (h *Handler) renderUsers(w http.ResponseWriter, r *http.Request, status int, errMsg string) {
 	users, err := h.Store.ListAdmins(r.Context())
 	if err != nil {
@@ -68,6 +72,7 @@ func (h *Handler) renderUsers(w http.ResponseWriter, r *http.Request, status int
 	h.render(w, status, "users", "layout", pd)
 }
 
+// userCreate tạo tài khoản admin mới từ form.
 func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
@@ -98,7 +103,7 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.Store.CreateAdmin(r.Context(), email, hash, role, actorFrom(r)); err != nil {
+	if _, err := h.Store.CreateAdmin(r.Context(), email, hash, role, h.actorFrom(r)); err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
 			h.renderUsers(w, r, http.StatusOK, "Email này đã tồn tại.")
 			return
@@ -111,6 +116,7 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/users?flash=user_created", http.StatusSeeOther)
 }
 
+// userUpdate cập nhật vai trò hoặc trạng thái khóa của một tài khoản.
 func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -136,7 +142,7 @@ func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Store.UpdateAdmin(r.Context(), id, role, disabled, actorFrom(r)); err != nil {
+	if err := h.Store.UpdateAdmin(r.Context(), id, role, disabled, h.actorFrom(r)); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			http.NotFound(w, r)
 			return
@@ -155,10 +161,12 @@ type apiKeysData struct {
 	NewFor string
 }
 
+// apiKeysPage hiển thị trang quản lý API key.
 func (h *Handler) apiKeysPage(w http.ResponseWriter, r *http.Request) {
 	h.renderAPIKeys(w, r, apiKeysData{}, "")
 }
 
+// renderAPIKeys hiển thị lại trang API key kèm thông báo lỗi.
 func (h *Handler) renderAPIKeys(w http.ResponseWriter, r *http.Request, d apiKeysData, errMsg string) {
 	keys, err := h.Store.ListAPIKeys(r.Context())
 	if err != nil {
@@ -172,17 +180,19 @@ func (h *Handler) renderAPIKeys(w http.ResponseWriter, r *http.Request, d apiKey
 	h.render(w, http.StatusOK, "apikeys", "layout", pd)
 }
 
-func (h *Handler) createKey(r *http.Request, name string, rps int, quota int64, exp *time.Time, rotatedFrom *int64) (string, error) {
+// createKey tạo API key mới với các tham số đã nhập và trả về key đầy đủ (chỉ hiện một lần).
+func (h *Handler) createKey(r *http.Request, name string, rps, maxBatch int, quota int64, exp *time.Time, rotatedFrom *int64) (string, error) {
 	full, prefix, hash, err := apikey.Generate()
 	if err != nil {
 		return "", err
 	}
 
 	_, err = h.Store.CreateAPIKey(r.Context(), store.NewAPIKey{Name: name, Prefix: prefix, KeyHash: hash,
-		RPSLimit: rps, DailyQuota: quota, ExpiresAt: exp, RotatedFrom: rotatedFrom}, actorFrom(r))
+		RPSLimit: rps, MaxBatch: maxBatch, DailyQuota: quota, ExpiresAt: exp, RotatedFrom: rotatedFrom}, h.actorFrom(r))
 	return full, err
 }
 
+// apiKeyCreate xử lý form tạo API key.
 func (h *Handler) apiKeyCreate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
@@ -197,6 +207,20 @@ func (h *Handler) apiKeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// max_batch: để trống hoặc 0 = giữ như cũ (burst bằng rps_limit); 1..MaxBatch = cho phép 1 lần gọi
+	// batch tới ngần ấy mục (tốc độ duy trì vẫn bị rps_limit chặn).
+	maxBatch := 0
+
+	if v := strings.TrimSpace(r.PostFormValue("max_batch")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > checker.MaxBatch {
+			h.renderAPIKeys(w, r, apiKeysData{}, "Cỡ batch tối đa phải từ 0 đến "+strconv.Itoa(checker.MaxBatch)+" (0 = bằng RPS).")
+			return
+		}
+
+		maxBatch = n
+	}
+
 	var exp *time.Time
 
 	if days, err := strconv.Atoi(strings.TrimSpace(r.PostFormValue("expires_days"))); err == nil && days > 0 {
@@ -204,7 +228,7 @@ func (h *Handler) apiKeyCreate(w http.ResponseWriter, r *http.Request) {
 		exp = &t
 	}
 
-	full, err := h.createKey(r, name, rps, quota, exp, nil)
+	full, err := h.createKey(r, name, rps, maxBatch, quota, exp, nil)
 	if err != nil {
 		h.serverError(w, r, err)
 		return
@@ -213,6 +237,7 @@ func (h *Handler) apiKeyCreate(w http.ResponseWriter, r *http.Request) {
 	h.renderAPIKeys(w, r, apiKeysData{NewKey: full, NewFor: name}, "")
 }
 
+// apiKeyRevoke thu hồi một API key.
 func (h *Handler) apiKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -222,7 +247,7 @@ func (h *Handler) apiKeyRevoke(w http.ResponseWriter, r *http.Request) {
 
 	k, err := h.Store.GetAPIKey(r.Context(), id)
 	if err == nil {
-		err = h.Store.RevokeAPIKey(r.Context(), id, actorFrom(r))
+		err = h.Store.RevokeAPIKey(r.Context(), id, h.actorFrom(r))
 	}
 
 	if err != nil {
@@ -239,6 +264,7 @@ func (h *Handler) apiKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/apikeys?flash=key_revoked", http.StatusSeeOther)
 }
 
+// apiKeyRotate xoay API key: tạo key mới và giữ key cũ trong thời gian ân hạn.
 func (h *Handler) apiKeyRotate(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -266,7 +292,7 @@ func (h *Handler) apiKeyRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	full, err := h.createKey(r, old.Name, old.RPSLimit, old.DailyQuota, old.ExpiresAt, &old.ID)
+	full, err := h.createKey(r, old.Name, old.RPSLimit, old.MaxBatch, old.DailyQuota, old.ExpiresAt, &old.ID)
 	if err != nil {
 		h.serverError(w, r, err)
 		return
@@ -284,7 +310,7 @@ func (h *Handler) apiKeyRotate(w http.ResponseWriter, r *http.Request) {
 	h.renderAPIKeys(w, r, apiKeysData{NewKey: full, NewFor: old.Name + " (xoay từ #" + strconv.FormatInt(old.ID, 10) + ")"}, "")
 }
 
-// auditVerify walks the audit hash chain and reports the first broken row.
+// auditVerify duyệt chuỗi hash audit và báo dòng hỏng đầu tiên.
 func (h *Handler) auditVerify(w http.ResponseWriter, r *http.Request) {
 	res, err := h.Store.VerifyAuditChain(r.Context())
 	if err != nil {

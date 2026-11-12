@@ -9,6 +9,7 @@ import (
 	"vsf/internal/model"
 )
 
+// TestAuditHash kiểm tra hash audit: thay đổi bất kỳ trường nào đều đổi hash, và không có va chạm do dịch ranh giới trường.
 func TestAuditHash(t *testing.T) {
 	key := AuditKeyFrom("", "session-secret")
 	id := int64(7)
@@ -45,7 +46,7 @@ func TestAuditHash(t *testing.T) {
 		t.Error("different keys must give different hashes")
 	}
 
-	// Moving a byte between adjacent fields must not collide.
+	// Đổi một byte giữa hai trường liền kề không được gây va chạm.
 	a := base
 	a.ActorEmail, a.Action = "ab", "c"
 	b := base
@@ -75,7 +76,7 @@ func TestVerifyAuditChain_DetectsTampering(t *testing.T) {
 		t.Fatalf("fresh chain should verify: %+v err=%v", res, err)
 	}
 
-	// 1) edit a row's content
+	// 1) sửa nội dung một dòng
 	if _, err := s.write.Exec(ctx, `UPDATE audit_logs SET action='forged' WHERE id=(SELECT id FROM audit_logs ORDER BY id OFFSET 1 LIMIT 1)`); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestVerifyAuditChain_DetectsTampering(t *testing.T) {
 		t.Fatalf("edit must be detected: %+v", res)
 	}
 
-	// 2) delete a row from the middle (also fixes the edit above by removing it)
+	// 2) xóa một dòng ở giữa (cũng làm việc sửa ở trên mất đi vì dòng đó bị xóa)
 	if _, err := s.write.Exec(ctx, `DELETE FROM audit_logs WHERE id=(SELECT id FROM audit_logs ORDER BY id OFFSET 1 LIMIT 1)`); err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// TestPhone kiểm tra chuẩn hóa số điện thoại theo vùng.
 func TestPhone(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -42,6 +43,7 @@ func TestPhone(t *testing.T) {
 	}
 }
 
+// TestParseURL kiểm tra phân tích URL và các ca chuẩn hóa.
 func TestParseURL(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -82,6 +84,7 @@ func TestParseURL(t *testing.T) {
 	}
 }
 
+// TestDomainChain kiểm tra chuỗi domain cha.
 func TestDomainChain(t *testing.T) {
 	got := domainChain("a.b.example.com")
 	want := []string{"a.b.example.com", "b.example.com", "example.com"}
@@ -100,6 +103,7 @@ func TestDomainChain(t *testing.T) {
 	}
 }
 
+// TestNormalizeEntry kiểm tra chuẩn hóa entry khi tạo.
 func TestNormalizeEntry(t *testing.T) {
 	k, err := NormalizeEntry(TypePhone, "", "0901 234 567", "VN")
 	if err != nil || k.Value != "+84901234567" || k.MatchType != MatchExact {
@@ -133,6 +137,7 @@ func TestNormalizeEntry(t *testing.T) {
 	}
 }
 
+// has cho biết danh sách khóa có khóa (loại, kiểu khớp, giá trị) đã cho hay không.
 func has(keys []Key, m MatchType, v string) bool {
 	for _, k := range keys {
 		if k.MatchType == m && k.Value == v {
@@ -143,6 +148,7 @@ func has(keys []Key, m MatchType, v string) bool {
 	return false
 }
 
+// TestCandidatesURL kiểm tra danh sách khóa ứng viên cho URL.
 func TestCandidatesURL(t *testing.T) {
 	norm, keys, err := Candidates(TypeURL, "http://a.evil.com/shop/item?utm_source=1&id=5", "VN")
 	if err != nil {
@@ -175,6 +181,7 @@ func TestCandidatesURL(t *testing.T) {
 	}
 }
 
+// TestStoredKeyMatchesCandidate kiểm tra khóa lưu khi tạo entry khớp với khóa ứng viên khi tra cứu.
 func TestStoredKeyMatchesCandidate(t *testing.T) {
 	stored := func(m MatchType, raw string) Key {
 		k, err := NormalizeEntry(TypeURL, m, raw, "VN")

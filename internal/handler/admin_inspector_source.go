@@ -15,8 +15,8 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// handlerSource describes the Go function that served a request, so the
-// inspector can show "which code handled this" next to the request details.
+// handlerSource mô tả hàm Go đã phục vụ một request, để Inspector hiện "đoạn code nào xử lý"
+// bên cạnh chi tiết request.
 type handlerSource struct {
 	Func string // short name, e.g. (*Handler).listEntries
 	File string // file name inside internal/handler
@@ -27,13 +27,13 @@ type handlerSource struct {
 	ShowCode    bool // false when source display is disabled by config
 }
 
-// routeInfo is what the inspector knows about the code behind one route.
+// routeInfo là những gì Inspector biết về mã phía sau một route.
 type routeInfo struct {
 	Handler     string   // runtime name of the endpoint handler
 	Middlewares []string // short names, outermost first
 }
 
-// buildRouteIndex maps "METHOD /route/pattern" to its handler and middleware chain.
+// buildRouteIndex ánh xạ "METHOD /route/pattern" tới handler và chuỗi middleware.
 func buildRouteIndex(r chi.Routes) map[string]routeInfo {
 	idx := map[string]routeInfo{}
 	_ = chi.Walk(r, func(method, route string, handler http.Handler, mws ...func(http.Handler) http.Handler) error {
@@ -50,6 +50,7 @@ func buildRouteIndex(r chi.Routes) map[string]routeInfo {
 	return idx
 }
 
+// funcName lấy tên hàm runtime của một giá trị hàm (dùng cho Inspector).
 func funcName(v any) string {
 	if fn := runtime.FuncForPC(reflect.ValueOf(v).Pointer()); fn != nil {
 		return fn.Name()
@@ -67,11 +68,9 @@ func shortFuncName(full string) string {
 
 var sourceCache sync.Map // method name -> *handlerSource (nil value cached too)
 
-// lookupHandlerSource resolves a runtime function name such as
-// "vsf/internal/handler.(*Handler).listEntries-fm" to its source. Source is
-// read from the directory this file was compiled from, so it only works when
-// the server runs next to the checkout (development); otherwise only the name
-// is returned.
+// lookupHandlerSource phân giải tên hàm runtime như "vsf/internal/handler.(*Handler).listEntries-fm" thành mã nguồn của nó.
+// Mã nguồn được đọc từ thư mục nơi file này được biên dịch, nên chỉ hoạt động khi server chạy cạnh bản checkout (môi trường phát triển);
+// nếu không thì chỉ trả về tên.
 func lookupHandlerSource(fullName string) *handlerSource {
 	if fullName == "" {
 		return nil
@@ -81,6 +80,7 @@ func lookupHandlerSource(fullName string) *handlerSource {
 	return &cp
 }
 
+// lookupCached tra mã nguồn của hàm đã được đệm, để không đọc lại file mỗi lần.
 func lookupCached(fullName string) *handlerSource {
 	short := shortFuncName(fullName)
 	out := &handlerSource{Func: short, ShowCode: true}
@@ -115,7 +115,7 @@ func lookupCached(fullName string) *handlerSource {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
-		src, err := os.ReadFile(path)
+		src, err := os.ReadFile(path)  // #nosec G304 -- path lấy từ tên file mã nguồn lúc biên dịch (runtime), chỉ dùng ở môi trường phát triển
 		if err != nil {
 			continue
 		}

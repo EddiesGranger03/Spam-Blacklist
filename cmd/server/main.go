@@ -27,6 +27,7 @@ import (
 	"vsf/internal/store"
 )
 
+// main là điểm vào của server: chạy run và thoát với mã lỗi nếu có lỗi.
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := run(log); err != nil {
@@ -35,10 +36,16 @@ func main() {
 	}
 }
 
+// run khởi tạo toàn bộ hệ thống (cấu hình, DB, Redis, Bloom, changefeed, HTTP server) và chạy đến khi nhận tín hiệu dừng.
 func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	return serve(ctx, stop, log)
+}
+
+// serve chạy server cho tới khi ctx bị hủy (tín hiệu dừng, hoặc test hủy trực tiếp) hoặc có lỗi nghiêm trọng.
+func serve(ctx context.Context, stop context.CancelFunc, log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -55,19 +62,38 @@ func run(log *slog.Logger) error {
 
 	defer st.Close()
 
-	sl, err := seal.New(cfg.DataKey, cfg.DataPepper, int16(cfg.DataKeyVersion))
+	sl, err := seal.New(cfg.DataKey, cfg.DataPepper, int16(cfg.DataKeyVersion), seal.WithRetiredKeys(cfg.DataKeysRetired))  // #nosec G115 -- DATA_KEY_VERSION đã được config.validate giới hạn 1..32767
 	if err != nil {
 		return err
 	}
 
-	// Keys must be installed before Migrate: the first start after upgrading
-	// converts the plaintext table to the encrypted layout.
+	// Phải cài khóa trước Migrate: lần khởi động đầu sau khi nâng cấp
+	// sẽ chuyển bảng plaintext sang bố cục mã hóa.
 	st.SetSealer(sl)
 	st.SetAuditKey(store.AuditKeyFrom(cfg.AuditKey, cfg.SessionSecret))
-	log.Info("encryption at rest enabled", "key_version", cfg.DataKeyVersion)
+	log.Info("encryption at rest enabled", "key_version", cfg.DataKeyVersion, "versions_readable", sl.Versions())
+	// Vân tay khóa (không lộ khóa) để đối chiếu với nơi lưu khóa: mất khóa thì dữ liệu không thể giải mã lại.
+	log.Info("data key fingerprints: hãy sao lưu DATA_KEY, DATA_PEPPER và DATA_KEY_V<n> ở nơi tách biệt với bản sao lưu DB",
+		"data_key", config.KeyFingerprint(cfg.DataKey), "pepper", config.KeyFingerprint(cfg.DataPepper))
 
+	for _, w := range cfg.Warnings() {
+		log.Warn(w)
+	}
+
+	// Migrate còn kiểm tra khóa với một mẫu dữ liệu đã lưu và từ chối chạy tiếp nếu khóa không đọc được.
 	if err := st.Migrate(ctx); err != nil {
 		return err
+	}
+
+	if chk := st.LastKeyCheck(); chk.Sampled > 0 {
+		log.Info("data keys verified against stored data", "sampled_rows", chk.Sampled, "rows_by_key_version", chk.Versions)
+
+		for v := range chk.Versions {
+			if v != int16(cfg.DataKeyVersion) {  // #nosec G115 -- DATA_KEY_VERSION đã được config.validate giới hạn 1..32767
+				log.Warn("some rows are still sealed under an older key: run `rekey` to move them, then the old key can be retired",
+					"key_version", v)
+			}
+		}
 	}
 
 	if err := bootstrapAdmin(ctx, st, cfg, log); err != nil {
@@ -78,7 +104,7 @@ func run(log *slog.Logger) error {
 	var rc cache.Cache = cache.Noop{}
 
 	if cfg.RedisAddr != "" {
-		rdb = redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+		rdb = redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
 		defer rdb.Close()
 		rc = cache.NewRedis(rdb, cfg.CacheTTL)
 	}
@@ -94,6 +120,8 @@ func run(log *slog.Logger) error {
 		func() float64 { return float64(bm.SizeBytes()) },
 		func() float64 { return feed.Lag().Seconds() },
 		func() float64 { n, _ := st.PoolStats(); return float64(n) },
+		func() float64 { return float64(feed.TailLen()) },
+		func() float64 { return feed.StalledFor().Seconds() },
 	)
 
 	ins := inspector.New(200)
@@ -106,6 +134,8 @@ func run(log *slog.Logger) error {
 		Addr:              cfg.HTTPAddr,
 		Handler:           h.Router(),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second, // chống slowloris; route upload/export tự nới bằng ResponseController
+		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
@@ -129,8 +159,10 @@ func run(log *slog.Logger) error {
 		}
 
 		log.Info("ready")
-		go feed.Run(ctx, cfg.PollInterval)
-		go backgroundJobs(ctx, log, st, feed, keys, cfg)
+		go supervise(ctx, log, "changefeed", loopRestartDelay, func(c context.Context) { feed.Run(c, cfg.PollInterval) })
+		go supervise(ctx, log, "background-jobs", loopRestartDelay, func(c context.Context) {
+			backgroundJobs(c, log, st, feed, keys, cfg)
+		})
 	}()
 
 	select {
@@ -148,12 +180,19 @@ func run(log *slog.Logger) error {
 	return srv.Shutdown(shutCtx)
 }
 
+// Chu kỳ của các vòng nền. Là biến (không phải hằng) để test rút ngắn được.
+var (
+	flushEvery = time.Minute // ghi lượt dùng API key xuống DB
+	purgeEvery = time.Hour   // dọn change_log và phiên hết hạn
+)
+
+// backgroundJobs chạy các vòng nền (changefeed, dựng lại Bloom, dọn phiên và changelog), mỗi vòng được giám sát và khởi động lại khi panic.
 func backgroundJobs(ctx context.Context, log *slog.Logger, st *store.Store, feed *changefeed.Feed,
 	keys *apikey.Service, cfg config.Config) {
 
-	minute := time.NewTicker(time.Minute)
+	minute := time.NewTicker(flushEvery)
 	defer minute.Stop()
-	hourly := time.NewTicker(time.Hour)
+	hourly := time.NewTicker(purgeEvery)
 	defer hourly.Stop()
 	rebuild := time.NewTicker(cfg.BloomRebuildInterval)
 	defer rebuild.Stop()
@@ -185,6 +224,7 @@ func backgroundJobs(ctx context.Context, log *slog.Logger, st *store.Store, feed
 	}
 }
 
+// bootstrapAdmin tạo tài khoản admin đầu tiên từ BOOTSTRAP_ADMIN_* khi bảng admin còn trống.
 func bootstrapAdmin(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) error {
 	n, err := st.CountAdmins(ctx)
 	if err != nil || n > 0 {

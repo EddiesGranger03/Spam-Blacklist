@@ -34,6 +34,7 @@ const (
 	sessionAbsolute = 12 * time.Hour
 )
 
+// securityHeaders thêm các header bảo mật (CSP, nosniff, chống nhúng khung, HSTS khi bật HTTPS).
 func (h *Handler) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hd := w.Header()
@@ -65,6 +66,7 @@ type statusWriter struct {
 	status int
 }
 
+// WriteHeader ghi nhận mã trạng thái lần đầu rồi chuyển tiếp cho writer gốc.
 func (w *statusWriter) WriteHeader(code int) {
 	if w.status == 0 {
 		w.status = code
@@ -73,6 +75,7 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Write ghi nội dung và đặt mã 200 nếu chưa có mã trạng thái.
 func (w *statusWriter) Write(b []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
@@ -81,14 +84,17 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// Flush chuyển tiếp Flush cho writer gốc (dùng khi stream).
 func (w *statusWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
+// Unwrap trả về writer gốc để http.ResponseController dùng được.
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// instrument đo thời gian và ghi metric, Inspector và log cho mỗi request.
 func (h *Handler) instrument(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -97,7 +103,7 @@ func (h *Handler) instrument(next http.Handler) http.Handler {
 		isInspectorInternal := strings.HasPrefix(path, "/admin/inspector") || strings.HasPrefix(path, "/static/")
 
 		var bodySnippet string
-		if !isInspectorInternal && r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) {
+		if !isInspectorInternal && strings.HasPrefix(path, "/admin") && r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) {
 			b, _ := io.ReadAll(io.LimitReader(r.Body, 2048))
 			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(b), r.Body))
 			bodySnippet = string(b)
@@ -127,7 +133,7 @@ func (h *Handler) instrument(next http.Handler) http.Handler {
 				FullPath:       r.URL.RequestURI(),
 				Status:         sw.status,
 				Duration:       dur,
-				ClientIP:       clientIP(r),
+				ClientIP:       h.clientIP(r),
 				UserAgent:      r.UserAgent(),
 				RequestHeaders: inspector.ExtractHeaders(r.Header),
 				RequestBody:    inspector.RedactBody(path, bodySnippet),
@@ -142,16 +148,18 @@ func (h *Handler) instrument(next http.Handler) http.Handler {
 
 		if h.Log != nil {
 			h.Log.Info("http", "method", r.Method, "route", route, "status", sw.status,
-				"ms", dur.Milliseconds(), "ip", clientIP(r), "req_id", r.Context().Value(requestIDKey()))
+				"ms", dur.Milliseconds(), "ip", h.clientIP(r), "req_id", r.Context().Value(requestIDKey()))
 		}
 	})
 }
 
+// sessionFrom lấy phiên đăng nhập từ context của request (nil nếu không có).
 func sessionFrom(r *http.Request) *model.Session {
 	s, _ := r.Context().Value(sessKey).(*model.Session)
 	return s
 }
 
+// redirectToLogin chuyển về trang đăng nhập (dùng HX-Redirect nếu là request HTMX).
 func redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("HX-Request") == "true" {
 		w.Header().Set("HX-Redirect", "/admin/login")
@@ -162,6 +170,7 @@ func redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
 
+// requireSession là middleware yêu cầu có phiên đăng nhập hợp lệ.
 func (h *Handler) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if sess := sessionFrom(r); sess != nil {
@@ -204,6 +213,7 @@ func (h *Handler) requireSession(next http.Handler) http.Handler {
 	})
 }
 
+// requireRole trả về middleware yêu cầu vai trò tối thiểu min.
 func requireRole(min model.Role) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -218,6 +228,7 @@ func requireRole(min model.Role) func(http.Handler) http.Handler {
 	}
 }
 
+// sameOrigin kiểm tra Origin của request có cùng nguồn với server hay không (chống CSRF).
 func sameOrigin(r *http.Request) bool {
 	if o := r.Header.Get("Origin"); o != "" {
 		u, err := url.Parse(o)
@@ -231,6 +242,7 @@ func sameOrigin(r *http.Request) bool {
 	return true
 }
 
+// csrfProtect là middleware kiểm tra token CSRF cho các request ghi.
 func (h *Handler) csrfProtect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -259,8 +271,9 @@ func (h *Handler) csrfProtect(next http.Handler) http.Handler {
 	})
 }
 
+// clearCookie xóa cookie phiên trên trình duyệt.
 func (h *Handler) clearCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: h.cookieName, Value: "", Path: "/", MaxAge: -1,
+	http.SetCookie(w, &http.Cookie{Name: h.cookieName, Value: "", Path: "/", MaxAge: -1,  // #nosec G124 -- Secure theo COOKIE_SECURE; APP_ENV=production bắt buộc COOKIE_SECURE=true (config.validate)
 		HttpOnly: true, Secure: h.Cfg.CookieSecure, SameSite: http.SameSiteLaxMode})
 }
 

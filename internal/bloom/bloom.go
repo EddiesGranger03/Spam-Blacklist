@@ -17,6 +17,7 @@ type Filter struct {
 	m    uint64
 }
 
+// New tạo Bloom filter với số phần tử dự kiến và tỉ lệ dương giả mục tiêu.
 func New(expectedItems uint64) *Filter {
 	if expectedItems < 1024 {
 		expectedItems = 1024
@@ -26,11 +27,13 @@ func New(expectedItems uint64) *Filter {
 	return &Filter{bits: make([]uint64, words), m: words * 64}
 }
 
+// probe tính vị trí bit thứ i cho hash h (double hashing).
 func (f *Filter) probe(h, i uint64) uint64 {
 	h2 := (h>>32 | h<<32) | 1
 	return (h + i*h2) % f.m
 }
 
+// Add thêm một hash vào filter.
 func (f *Filter) Add(h uint64) {
 	for i := uint64(0); i < numHashes; i++ {
 		pos := f.probe(h, i)
@@ -38,6 +41,7 @@ func (f *Filter) Add(h uint64) {
 	}
 }
 
+// Test cho biết hash có thể có trong filter hay không (không bao giờ bỏ sót hash đã thêm).
 func (f *Filter) Test(h uint64) bool {
 	for i := uint64(0); i < numHashes; i++ {
 		pos := f.probe(h, i)
@@ -49,6 +53,7 @@ func (f *Filter) Test(h uint64) bool {
 	return true
 }
 
+// SizeBytes trả về bộ nhớ filter đang dùng (byte).
 func (f *Filter) SizeBytes() uint64 { return uint64(len(f.bits)) * 8 }
 
 var ErrRebuilding = errors.New("bloom rebuild already in progress")
@@ -62,12 +67,16 @@ type Manager struct {
 	pending    []uint64
 }
 
+// NewManager tạo Manager quản lý filter hiện tại và filter đang dựng lại.
 func NewManager() *Manager { return &Manager{} }
 
+// Ready cho biết filter đã được dựng xong lần đầu hay chưa.
 func (m *Manager) Ready() bool { return m.cur.Load() != nil }
 
+// Items trả về số phần tử đã thêm vào filter hiện tại.
 func (m *Manager) Items() uint64 { return m.items.Load() }
 
+// SizeBytes trả về bộ nhớ của filter hiện tại.
 func (m *Manager) SizeBytes() uint64 {
 	if f := m.cur.Load(); f != nil {
 		return f.SizeBytes()
@@ -76,6 +85,7 @@ func (m *Manager) SizeBytes() uint64 {
 	return 0
 }
 
+// Test kiểm tra hash qua filter hiện tại; khi chưa sẵn sàng thì coi là có thể có (an toàn).
 func (m *Manager) Test(h uint64) bool {
 	f := m.cur.Load()
 	if f == nil {
@@ -85,6 +95,7 @@ func (m *Manager) Test(h uint64) bool {
 	return f.Test(h)
 }
 
+// Add thêm hash vào filter hiện tại (và vào filter đang dựng lại nếu có).
 func (m *Manager) Add(h uint64) {
 	m.mu.Lock()
 
@@ -101,6 +112,7 @@ func (m *Manager) Add(h uint64) {
 	m.items.Add(1)
 }
 
+// Rebuild dựng lại filter từ toàn bộ hash trong DB rồi thay thế filter cũ.
 func (m *Manager) Rebuild(ctx context.Context, expectedItems uint64,
 	load func(ctx context.Context, emit func(uint64)) error) error {
 
@@ -117,11 +129,26 @@ func (m *Manager) Rebuild(ctx context.Context, expectedItems uint64,
 
 	fresh := New(expectedItems)
 	var n uint64
+
+	// Nếu load bị panic, việc dựng lại sẽ kẹt ở trạng thái đang chạy mãi mãi: mọi lần Rebuild sau đó sẽ trả ErrRebuilding
+	// và Add sẽ tiếp tục nối vào m.pending không giới hạn. Hoàn tác cờ ở đường này (panic vẫn được truyền tiếp).
+	finished := false
+
+	defer func() {
+		if !finished {
+			m.mu.Lock()
+			m.rebuilding = false
+			m.pending = nil
+			m.mu.Unlock()
+		}
+	}()
+
 	err := load(ctx, func(h uint64) { fresh.Add(h); n++ })
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.rebuilding = false
+	finished = true
 	pending := m.pending
 	m.pending = nil
 

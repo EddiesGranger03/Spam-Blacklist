@@ -16,17 +16,16 @@ import (
 
 const sealBatch = 5000
 
-// convertToSealed moves blacklist_entries from the original plaintext layout to
-// the encrypted layout, in one transaction:
+// convertToSealed chuyển blacklist_entries từ bố cục plaintext ban đầu sang bố cục mã hóa, trong một transaction:
 //
-//  1. build blacklist_entries_v2 (partitioned by the keyed value_hash),
-//  2. stream every row through the Sealer into it,
-//  3. verify row count and decrypt a sample against the plaintext,
-//  4. swap the tables and drop the plaintext one,
-//  5. scrub plaintext from old, unchained audit_logs rows.
+//  1. tạo blacklist_entries_v2 (phân vùng theo value_hash có khóa),
+//  2. đưa mọi dòng qua Sealer rồi ghi vào bảng mới,
+//  3. kiểm tra số dòng và giải mã một mẫu để so với bản rõ,
+//  4. hoán đổi hai bảng và xóa bảng plaintext,
+//  5. xóa bản rõ khỏi các dòng audit_logs cũ chưa được nối chuỗi.
 //
-// Any failure rolls everything back and leaves the plaintext table untouched.
-// It is a no-op once the table is already in the new layout.
+// Mọi lỗi đều rollback toàn bộ và để nguyên bảng plaintext.
+// Hàm không làm gì nếu bảng đã ở bố cục mới.
 func (s *Store) convertToSealed(ctx context.Context) error {
 	var legacy bool
 	if err := s.write.QueryRow(ctx, `SELECT EXISTS (
@@ -53,7 +52,7 @@ func (s *Store) convertToSealed(ctx context.Context) error {
 
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Block writers for the whole conversion.
+	// Chặn các lệnh ghi trong suốt quá trình chuyển đổi.
 	if _, err := tx.Exec(ctx, `LOCK TABLE blacklist_entries IN ACCESS EXCLUSIVE MODE`); err != nil {
 		return err
 	}
@@ -96,6 +95,7 @@ func (s *Store) convertToSealed(ctx context.Context) error {
 	return nil
 }
 
+// createSealedTable tạo bảng blacklist_entries_v2 với các cột mã hóa, trong transaction đã cho.
 func createSealedTable(ctx context.Context, tx pgx.Tx) error {
 	_, err := tx.Exec(ctx, `
 		CREATE TABLE blacklist_entries_v2 (
@@ -129,8 +129,8 @@ func createSealedTable(ctx context.Context, tx pgx.Tx) error {
 var sealedColumns = []string{"id", "type", "match_type", "value_hash", "value_blind", "value_enc", "note_enc",
 	"source_enc", "key_version", "category", "risk_score", "expires_at", "created_by", "created_at", "updated_at"}
 
-// copySealed streams the plaintext table in id order, in keyset-paginated
-// batches (a COPY cannot run on a connection that still has rows open).
+// copySealed đọc bảng plaintext theo thứ tự id, theo từng lô phân trang keyset
+// (COPY không chạy được trên kết nối còn dòng đang mở).
 func (s *Store) copySealed(ctx context.Context, tx pgx.Tx) (int64, error) {
 	var (
 		after int64
@@ -163,6 +163,7 @@ func (s *Store) copySealed(ctx context.Context, tx pgx.Tx) (int64, error) {
 	}
 }
 
+// sealRows đọc các dòng plaintext cũ và mã hóa thành lô để ghi vào bảng mới.
 func (s *Store) sealRows(rows pgx.Rows) (batch [][]any, last int64, err error) {
 	defer rows.Close()
 
@@ -198,8 +199,8 @@ func (s *Store) sealRows(rows pgx.Rows) (batch [][]any, last int64, err error) {
 	return batch, last, rows.Err()
 }
 
-// verifySealed checks the row count and decrypts a ~1/997 sample, comparing it
-// with the plaintext and recomputing its hash and blind index.
+// verifySealed kiểm tra số dòng và giải mã khoảng 1/997 mẫu, so với bản rõ
+// và tính lại hash cùng chỉ mục blind của mẫu đó.
 func (s *Store) verifySealed(ctx context.Context, tx pgx.Tx, want int64) error {
 	var got, old int64
 	if err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM blacklist_entries_v2),
@@ -237,7 +238,7 @@ func (s *Store) verifySealed(ctx context.Context, tx pgx.Tx, want int64) error {
 		}
 
 		var e model.Entry
-		if err := s.openEntry(&e, valueEnc, noteEnc, sourceEnc); err != nil {
+		if err := s.openEntry(&e, s.sealer.Version(), valueEnc, noteEnc, sourceEnc); err != nil {
 			return fmt.Errorf("verify id %d: %w", id, err)
 		}
 
@@ -261,6 +262,7 @@ func (s *Store) verifySealed(ctx context.Context, tx pgx.Tx, want int64) error {
 	return nil
 }
 
+// swapSealedTable đổi tên bảng mã hóa thành blacklist_entries và xóa bảng plaintext cũ.
 func swapSealedTable(ctx context.Context, tx pgx.Tx) error {
 	_, err := tx.Exec(ctx, `
 		ALTER SEQUENCE blacklist_entries_id_seq OWNED BY blacklist_entries_v2.id;
@@ -282,9 +284,8 @@ func swapSealedTable(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-// scrubAudit masks plaintext inside the detail of old entry.* audit rows.
-// Rows that already carry an entry_hash are left alone (editing them would
-// break the chain) and are only counted.
+// scrubAudit xóa bản rõ bên trong chi tiết của các dòng audit entry.* cũ.
+// Các dòng đã có entry_hash được giữ nguyên (sửa chúng sẽ phá chuỗi) và chỉ được đếm.
 func (s *Store) scrubAudit(ctx context.Context, tx pgx.Tx) (scrubbed, chained int, err error) {
 	type row struct {
 		id     int64
@@ -340,8 +341,8 @@ func (s *Store) scrubAudit(ctx context.Context, tx pgx.Tx) (scrubbed, chained in
 	return scrubbed, chained, nil
 }
 
-// scrubAuditDetail masks value/note/source in the before/after objects of an
-// audit detail document. It reports whether anything changed.
+// scrubAuditDetail che value/note/source trong các đối tượng before/after của một tài liệu chi tiết audit.
+// Hàm trả về true nếu có thay đổi.
 func scrubAuditDetail(detail string) ([]byte, bool) {
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(detail), &doc); err != nil {

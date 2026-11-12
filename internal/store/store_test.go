@@ -12,6 +12,7 @@ import (
 	"vsf/internal/normalize"
 )
 
+// newTestStore tạo Store nối tới database test, làm rỗng các bảng, rồi Migrate.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -40,6 +41,17 @@ func newTestStore(t *testing.T) *Store {
 			"Hãy trỏ TEST_DATABASE_URL vào một database riêng cho test (vd vsf_test).", dbName)
 	}
 
+	// Migrate giờ kiểm tra các khóa đã cấu hình với những dòng đã có trong bảng, và từ chối tiếp tục nếu
+	// không đọc được chúng (C4). Các dòng do test trước để lại, có thể mã hóa bằng khóa khác, không được có mặt ở đây.
+	var tableExists bool
+	if err := s.write.QueryRow(ctx, `SELECT to_regclass('blacklist_entries') IS NOT NULL`).Scan(&tableExists); err != nil {
+		t.Fatal(err)
+	}
+
+	if tableExists {
+		resetTables(t, s)
+	}
+
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -48,15 +60,13 @@ func newTestStore(t *testing.T) *Store {
 		t.Fatalf("second migrate: %v", err)
 	}
 
-	if _, err := s.write.Exec(ctx, `TRUNCATE blacklist_entries, change_log, audit_logs, sessions, api_keys, admins RESTART IDENTITY CASCADE`); err != nil {
-		t.Fatal(err)
-	}
-
+	// (Các bảng đã được làm rỗng trước khi gọi Migrate ở trên; trên database mới tinh thì chúng vừa được tạo và rỗng.)
 	return s
 }
 
 var actor = model.Actor{ID: 0, Email: "tester@example.com", IP: "127.0.0.1"}
 
+// mustKey tạo khóa chuẩn hóa từ một giá trị, báo lỗi test nếu thất bại.
 func mustKey(t *testing.T, ty normalize.Type, m normalize.MatchType, raw string) normalize.Key {
 	t.Helper()
 	k, err := normalize.NormalizeEntry(ty, m, raw, "VN")
@@ -67,6 +77,7 @@ func mustKey(t *testing.T, ty normalize.Type, m normalize.MatchType, raw string)
 	return k
 }
 
+// TestEntriesLifecycle kiểm tra vòng đời entry: tạo, đọc, sửa, xóa và trùng lặp.
 func TestEntriesLifecycle(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -118,6 +129,7 @@ func TestEntriesLifecycle(t *testing.T) {
 	}
 }
 
+// TestListPagination kiểm tra phân trang danh sách entry theo keyset.
 func TestListPagination(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -155,6 +167,7 @@ type sliceIter struct {
 	i    int
 }
 
+// Next trả về dòng tiếp theo của iterator tạo từ slice.
 func (s *sliceIter) Next() (ImportRow, bool) {
 	if s.i >= len(s.rows) {
 		return ImportRow{}, false
@@ -163,8 +176,10 @@ func (s *sliceIter) Next() (ImportRow, bool) {
 	s.i++
 	return s.rows[s.i-1], true
 }
+// Err trả về lỗi của iterator tạo từ slice (luôn nil).
 func (s *sliceIter) Err() error { return nil }
 
+// TestImportAndChanges kiểm tra import ghi đúng dòng và change_log.
 func TestImportAndChanges(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -225,6 +240,7 @@ func TestImportAndChanges(t *testing.T) {
 	}
 }
 
+// TestAdminsSessionsAPIKeys kiểm tra CRUD admin, phiên đăng nhập và API key.
 func TestAdminsSessionsAPIKeys(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -256,9 +272,22 @@ func TestAdminsSessionsAPIKeys(t *testing.T) {
 		t.Fatalf("session should be gone, got %v", err)
 	}
 
-	k, err := s.CreateAPIKey(ctx, NewAPIKey{Name: "n", Prefix: "abcd1234", KeyHash: []byte("h"), RPSLimit: 10}, actor)
+	k, err := s.CreateAPIKey(ctx, NewAPIKey{Name: "n", Prefix: "abcd1234", KeyHash: []byte("h"), RPSLimit: 10, MaxBatch: 100}, actor)
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	if k.MaxBatch != 100 {
+		t.Fatalf("max_batch phải được lưu và đọc lại đúng, got %d", k.MaxBatch)
+	}
+
+	if got, err := s.GetAPIKeyByPrefix(ctx, "abcd1234"); err != nil || got.MaxBatch != 100 || got.RPSLimit != 10 {
+		t.Fatalf("GetAPIKeyByPrefix = %+v, %v", got, err)
+	}
+
+	other, err := s.CreateAPIKey(ctx, NewAPIKey{Name: "legacy-style", Prefix: "efgh5678", KeyHash: []byte("h"), RPSLimit: 10}, actor)
+	if err != nil || other.MaxBatch != 0 {
+		t.Fatalf("key không đặt max_batch phải có max_batch=0: %+v, %v", other, err)
 	}
 
 	if err := s.RevokeAPIKey(ctx, k.ID, actor); err != nil {
@@ -277,5 +306,140 @@ func TestAdminsSessionsAPIKeys(t *testing.T) {
 	logs, _, err := s.ListAudit(ctx, 0, 100)
 	if err != nil || len(logs) < 4 {
 		t.Fatalf("audit logs = %d, %v", len(logs), err)
+	}
+}
+
+// C1: một transaction khác đang mở giữ xmin. Entry vừa commit phải vẫn được ChangesSince trả về (để nạp Bloom
+// ngay), đánh dấu Pending; khi transaction kia kết thúc nó mới thành an toàn.
+func TestChangesSinceReportsPendingBehindOpenTransaction(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// xmin là dùng chung toàn cụm: một transaction mở ở BẤT KỲ database nào của instance Postgres này đều giữ nó lại,
+	// khiến "dòng trở nên an toàn sau khi transaction của chúng ta kết thúc" sai vì lý do không liên quan tới code.
+	var foreign int
+	if err := s.write.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend'
+		AND pid <> pg_backend_pid() AND xact_start IS NOT NULL`).Scan(&foreign); err != nil {
+		t.Fatal(err)
+	}
+
+	if foreign > 0 {
+		t.Skipf("%d transaction mở ở nơi khác trong cụm Postgres đang giữ xmin; test này cần một cụm DB yên tĩnh", foreign)
+	}
+
+	holder, err := s.write.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer holder.Rollback(ctx)
+
+	if _, err := holder.Exec(ctx, `SELECT pg_current_xact_id()`); err != nil { // gán xid, bắt đầu giữ xmin
+		t.Fatal(err)
+	}
+
+	if _, err := s.CreateEntry(ctx, mustKey(t, normalize.TypePhone, "", "0902000777"),
+		model.EntryInput{Category: "spam", RiskScore: 50}, actor); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ChangesSince(ctx, "0", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 1 || !got[0].Pending {
+		t.Fatalf("entry đã commit phía sau transaction đang mở phải được trả về với Pending=true, got %+v", got)
+	}
+
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err = s.ChangesSince(ctx, "0", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 1 || got[0].Pending {
+		t.Fatalf("sau khi transaction kia kết thúc dòng phải an toàn (Pending=false), got %+v", got)
+	}
+}
+
+// Sắp xếp theo xid phải là sắp xếp SỐ. Trước đây "ORDER BY xid, seq" bị hiểu là cột kết quả xid::text nên sắp theo
+// chữ: "100" < "99". Phân trang LIMIT 1 trả xid=100 trước, con trỏ nhảy qua 99 và dòng xid=99 bị bỏ sót vĩnh viễn.
+func TestChangesSinceOrdersXIDNumerically(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.write.Exec(ctx, `INSERT INTO change_log(xid, value_hash) VALUES
+		('99'::text::xid8, 111), ('100'::text::xid8, 222), ('1000'::text::xid8, 333)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Duyệt từng dòng một như một vòng phân trang, phải gặp đủ theo đúng thứ tự số.
+	var seen []string
+
+	x, seq := "0", int64(0)
+
+	for i := 0; i < 5; i++ {
+		page, err := s.ChangesSince(ctx, x, seq, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(page) == 0 {
+			break
+		}
+
+		seen = append(seen, page[0].XID)
+		x, seq = page[0].XID, page[0].Seq
+	}
+
+	if len(seen) != 3 || seen[0] != "99" || seen[1] != "100" || seen[2] != "1000" {
+		t.Fatalf("phân trang phải trả xid theo thứ tự số 99,100,1000, got %v", seen)
+	}
+
+	// Head là dòng cuối theo thứ tự SỐ (1000), không phải theo chữ ("99").
+	hx, _, err := s.Head(ctx)
+	if err != nil || hx != "1000" {
+		t.Fatalf("Head phải là xid lớn nhất theo số (1000), got %q, %v", hx, err)
+	}
+}
+
+// resetTables đưa các bảng về trạng thái trống, id bắt đầu lại từ 1 như `TRUNCATE ... RESTART IDENTITY`.
+//
+// TRUNCATE trên bảng có 32 partition tốn khoảng 0,6 giây MỖI test (đo: 616 ms so với khoảng 8 ms cho DELETE và đặt lại
+// sequence trên bảng trống). Với vài chục test đó là phần lớn thời gian chạy của gói. Khi bảng đang chứa nhiều dòng
+// (test import lớn) DELETE chậm hơn TRUNCATE, nên vẫn dùng TRUNCATE trong trường hợp đó.
+func resetTables(t *testing.T, s *Store) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	var rows int64
+	if err := s.write.QueryRow(ctx, `SELECT (SELECT count(*) FROM blacklist_entries) + (SELECT count(*) FROM change_log)
+		+ (SELECT count(*) FROM audit_logs)`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+
+	if rows > 20000 {
+		if _, err := s.write.Exec(ctx, `TRUNCATE blacklist_entries, change_log, audit_logs, sessions, api_keys, admins RESTART IDENTITY CASCADE`); err != nil {
+			t.Fatal(err)
+		}
+
+		return
+	}
+
+	// Thứ tự theo khóa ngoại: sessions tham chiếu admins.
+	if _, err := s.write.Exec(ctx, `
+		DELETE FROM sessions; DELETE FROM api_keys; DELETE FROM audit_logs; DELETE FROM change_log;
+		DELETE FROM blacklist_entries; DELETE FROM admins;
+		SELECT setval(pg_get_serial_sequence('blacklist_entries','id'), 1, false),
+		       setval(pg_get_serial_sequence('change_log','seq'), 1, false),
+		       setval(pg_get_serial_sequence('audit_logs','id'), 1, false),
+		       setval(pg_get_serial_sequence('api_keys','id'), 1, false),
+		       setval(pg_get_serial_sequence('admins','id'), 1, false)`); err != nil {
+		t.Fatal(err)
 	}
 }

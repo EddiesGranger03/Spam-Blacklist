@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: vsf
       POSTGRES_DB: vsf
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -17,9 +17,9 @@ services:
 
   redis:
     image: redis:7
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--requirepass", "${REDIS_PASSWORD:-vsf-dev-redis}"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   app:
     profiles: ["app"]
@@ -36,6 +36,7 @@ services:
       DATA_KEY: ${DATA_KEY:-}
       DATA_PEPPER: ${DATA_PEPPER:-}
       REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-vsf-dev-redis}
       SESSION_SECRET: dev-secret-not-for-production-0123456789
       BOOTSTRAP_ADMIN_EMAIL: admin@example.com
       BOOTSTRAP_ADMIN_PASSWORD: ChangeMe-12345

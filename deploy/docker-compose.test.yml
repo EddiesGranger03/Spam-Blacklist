@@ -1,0 +1,26 @@
+# Postgres riêng chỉ để chạy test, tách khỏi compose dev. Không có session hay ứng dụng nào khác kết nối vào,
+# nên các test phụ thuộc xmin của cả cụm (ví dụ TestChangeLogHeadAndPurge) luôn chạy thay vì tự bỏ qua.
+# Chạy (project riêng "vsftest", chỉ mở cổng 127.0.0.1:5544):
+#   docker compose -f deploy/docker-compose.test.yml up -d --wait
+#   TEST_DATABASE_URL='postgres://vsf:vsf@localhost:5544/vsf_test?sslmode=disable' go test -count=1 -p 1 ./...
+#   docker compose -f deploy/docker-compose.test.yml down
+# Chỉ dùng cho test: fsync=off và dữ liệu nằm trên tmpfs, mất khi container dừng.
+name: vsftest
+
+services:
+  postgres:
+    image: postgres:16
+    command: ["postgres", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
+    environment:
+      POSTGRES_USER: vsf
+      POSTGRES_PASSWORD: vsf
+      POSTGRES_DB: vsf_test
+    ports:
+      - "127.0.0.1:5544:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vsf -d vsf_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

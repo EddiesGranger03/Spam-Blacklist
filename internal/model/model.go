@@ -33,6 +33,7 @@ type EntryInput struct {
 	ExpiresAt *time.Time
 }
 
+// Validate kiểm tra dữ liệu nhập của một entry (loại, kiểu khớp, rủi ro, danh mục, ...).
 func (in *EntryInput) Validate() error {
 	if in.Category == "" {
 		in.Category = "spam"
@@ -65,6 +66,7 @@ const (
 	RoleAdmin  Role = "admin"
 )
 
+// Level trả về mức quyền dạng số của vai trò (0 là không hợp lệ).
 func (r Role) Level() int {
 	switch r {
 	case RoleViewer:
@@ -80,8 +82,10 @@ func (r Role) Level() int {
 	return 0
 }
 
+// AtLeast cho biết vai trò có ít nhất quyền của min hay không.
 func (r Role) AtLeast(min Role) bool { return r.Level() >= min.Level() && r.Level() > 0 }
 
+// ValidRole cho biết vai trò có hợp lệ (có mức quyền lớn hơn 0) hay không.
 func ValidRole(r Role) bool { return r.Level() > 0 }
 
 type Actor struct {
@@ -118,6 +122,7 @@ type APIKey struct {
 	KeyHash     []byte     `json:"-"`
 	Status      string     `json:"status"`
 	RPSLimit    int        `json:"rps_limit"`
+	MaxBatch    int        `json:"max_batch"` // 0 = burst bằng rps_limit; >0 = cho phép 1 lần gọi tới ngần ấy mục
 	DailyQuota  int64      `json:"daily_quota"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	RotatedFrom *int64     `json:"rotated_from,omitempty"`
@@ -142,4 +147,10 @@ type Change struct {
 	Seq  int64
 	XID  string
 	Hash int64
+
+	// Pending: dòng đã commit và nhìn thấy được, nhưng xid của nó chưa nhỏ hơn xmin của database
+	// (có transaction cũ hơn vẫn đang mở), nên changefeed không được đẩy con trỏ qua nó:
+	// một transaction commit sau có thể vẫn tạo ra dòng đứng trước dòng này. Hash vẫn an toàn để thêm vào Bloom filter ngay.
+	// Giá trị zero (false) nghĩa là "an toàn".
+	Pending bool
 }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"vsf/internal/metrics"
 	"vsf/internal/model"
 	"vsf/internal/normalize"
 	"vsf/internal/store"
@@ -51,6 +53,7 @@ type importView struct {
 	Running                 bool
 }
 
+// view tạo bản hiển thị (importView) của job import để trả về cho trang trạng thái.
 func (j *importJob) view() importView {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -65,8 +68,10 @@ type importJobs struct {
 	order []string
 }
 
+// newImportJobs tạo bộ quản lý các job import (lưu trong bộ nhớ).
 func newImportJobs() *importJobs { return &importJobs{byID: map[string]*importJob{}} }
 
+// add thêm một job import vào bộ quản lý.
 func (s *importJobs) add(j *importJob) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -79,6 +84,7 @@ func (s *importJobs) add(j *importJob) {
 	}
 }
 
+// get tìm job import theo ID; trả nil nếu không có.
 func (s *importJobs) get(id string) *importJob {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -95,6 +101,7 @@ type csvIterator struct {
 	err         error
 }
 
+// newCSVIterator tạo iterator đọc file CSV import, nhận diện các cột và kiểu dữ liệu mặc định.
 func newCSVIterator(rd io.Reader, defaultType, region string, job *importJob) (*csvIterator, error) {
 	cr := csv.NewReader(rd)
 	cr.FieldsPerRecord = -1
@@ -122,6 +129,7 @@ func newCSVIterator(rd io.Reader, defaultType, region string, job *importJob) (*
 	return &csvIterator{r: cr, cols: cols, defaultType: defaultType, region: region, job: job, line: 1}, nil
 }
 
+// field lấy giá trị một cột theo tên từ dòng CSV đã đọc.
 func (it *csvIterator) field(rec []string, name string) string {
 	i, ok := it.cols[name]
 	if !ok || i >= len(rec) {
@@ -132,6 +140,7 @@ func (it *csvIterator) field(rec []string, name string) string {
 	return strings.TrimPrefix(s, "'")
 }
 
+// reject ghi nhận một dòng CSV bị loại kèm lý do.
 func (it *csvIterator) reject(msg string) {
 	it.job.mu.Lock()
 	it.job.Rejected++
@@ -143,6 +152,7 @@ func (it *csvIterator) reject(msg string) {
 	it.job.mu.Unlock()
 }
 
+// Next trả về dòng CSV hợp lệ kế tiếp để nạp; bỏ qua và đếm các dòng lỗi.
 func (it *csvIterator) Next() (store.ImportRow, bool) {
 	for {
 		rec, err := it.r.Read()
@@ -198,13 +208,20 @@ func (it *csvIterator) Next() (store.ImportRow, bool) {
 	}
 }
 
+// Err trả về lỗi đọc file (nil nếu không có).
 func (it *csvIterator) Err() error { return it.err }
 
+// importPage hiển thị trang import.
 func (h *Handler) importPage(w http.ResponseWriter, r *http.Request) {
 	h.render(w, http.StatusOK, "import", "layout", h.newPage(r, "Import", "import", nil))
 }
 
+// importStart nhận file upload, lưu tạm và bắt đầu job import nền.
 func (h *Handler) importStart(w http.ResponseWriter, r *http.Request) {
+	// Upload lớn cần đọc lâu hơn ReadTimeout toàn cục (30s); nới riêng cho route này.
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(importReadWindow))
+
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -240,7 +257,10 @@ func (h *Handler) importStart(w http.ResponseWriter, r *http.Request) {
 
 			tmpPath = f.Name()
 			_, cerr := io.Copy(f, part)
-			f.Close()
+			if cerr == nil {
+				// Lỗi khi đóng file ghi (ví dụ hết đĩa) cũng là lỗi upload: phải báo, không được bỏ qua.
+				cerr = f.Close()
+			}
 
 			if cerr != nil {
 				h.cleanup(tmpPath)
@@ -263,39 +283,68 @@ func (h *Handler) importStart(w http.ResponseWriter, r *http.Request) {
 
 	idb := make([]byte, 8)
 	_, _ = rand.Read(idb)
-	job := &importJob{ID: hex.EncodeToString(idb), Actor: actorFrom(r), Started: time.Now(), State: "running"}
+	job := &importJob{ID: hex.EncodeToString(idb), Actor: h.actorFrom(r), Started: time.Now(), State: "running"}
 	h.jobs.add(job)
-	go h.runImport(job, tmpPath, defaultType)
+	go h.guardImport(job, func() { h.runImport(job, tmpPath, defaultType) })
 
 	pd := h.newPage(r, "Import", "import", job.view())
 	h.render(w, http.StatusOK, "import", "import_status", pd)
 }
 
+// guardImport chạy một job import và biến panic thành job failed thay vì để nó làm sập toàn bộ process.
+//
+// runImport chạy trong goroutine riêng nên chimw.Recoverer không thấy được panic của nó, mà trong Go một panic không được recover ở bất kỳ goroutine nào
+// đều kết thúc chương trình: một file upload lỗi có thể làm sập server với mọi người. Chính sách đúng cho goroutine NÀY là đánh dấu job failed
+// (các lô đã commit trước panic được giữ, và đã được phản ánh vào job.Inserted/Updated qua callback tiến độ), ghi log kèm stack, và đếm lại.
+// Các goroutine khác cần chính sách khác (CheckBatch cô lập từng mục; các vòng nền không được chết âm thầm), vì vậy đây không phải
+// một helper "safe go" dùng chung.
+func (h *Handler) guardImport(job *importJob, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			metrics.ImportPanics.Inc()
+			h.Log.Error("import job panicked; marked failed", "job", job.ID, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+
+			job.mu.Lock()
+			job.Finished = time.Now()
+			job.State = "failed"
+			job.Err = "lỗi nội bộ khi import (panic). Các đợt đã ghi trước đó được giữ lại; tải lại đúng file này là an toàn. Xem log máy chủ."
+			job.mu.Unlock()
+		}
+	}()
+
+	fn()
+}
+
+// cleanup xóa file tạm của một job import sau khi xong.
 func (h *Handler) cleanup(path string) {
 	if path != "" {
 		_ = os.Remove(path)
 	}
 }
 
+// runImport chạy job import trong goroutine nền, cập nhật tiến độ và trạng thái.
 func (h *Handler) runImport(job *importJob, path, defaultType string) {
 	defer h.cleanup(path)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 	defer cancel()
 
+	// Import ghi theo lô, nên Inserted/Updated luôn là những gì thật sự có trong database: chúng được hiển thị
+	// khi job đang chạy và được giữ lại khi job lỗi (các lô đã commit trước lỗi không bị rollback).
 	finish := func(res store.ImportResult, err error) {
 		job.mu.Lock()
 		defer job.mu.Unlock()
 		job.Finished = time.Now()
+		job.Inserted, job.Updated = res.Inserted, res.Updated
 
 		if err != nil {
 			job.State, job.Err = "failed", err.Error()
 			return
 		}
 
-		job.State, job.Inserted, job.Updated = "done", res.Inserted, res.Updated
+		job.State = "done"
 	}
 
-	f, err := os.Open(path)
+	f, err := os.Open(path)  // #nosec G304 -- path do server tạo bằng os.CreateTemp, không lấy từ dữ liệu người dùng
 	if err != nil {
 		finish(store.ImportResult{}, err)
 		return
@@ -308,7 +357,11 @@ func (h *Handler) runImport(job *importJob, path, defaultType string) {
 		return
 	}
 
-	res, err := h.Store.Import(ctx, it, job.Actor)
+	res, err := h.Store.ImportWith(ctx, it, job.Actor, store.ImportOptions{Progress: func(r store.ImportResult) {
+		job.mu.Lock()
+		job.Inserted, job.Updated = r.Inserted, r.Updated
+		job.mu.Unlock()
+	}})
 	if err == nil {
 		err = it.Err()
 	}
@@ -324,6 +377,7 @@ func (h *Handler) runImport(job *importJob, path, defaultType string) {
 	finish(res, err)
 }
 
+// importStatus trả về trạng thái và tiến độ của một job import.
 func (h *Handler) importStatus(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.get(chi.URLParam(r, "job"))
 	if job == nil {
@@ -336,6 +390,7 @@ func (h *Handler) importStatus(w http.ResponseWriter, r *http.Request) {
 
 var phoneLike = regexp.MustCompile(`^\+\d{5,20}$`)
 
+// csvSafe thêm dấu ' trước giá trị bắt đầu bằng ký tự công thức (= + - @) để chống CSV injection.
 func csvSafe(s string) string {
 	if s == "" || phoneLike.MatchString(s) {
 		return s
@@ -349,11 +404,36 @@ func csvSafe(s string) string {
 	return s
 }
 
+// importReadWindow là thời gian tối đa để nhận xong một file upload import.
+const importReadWindow = 10 * time.Minute
+
+// exportWriteWindow là hạn ghi cho MỖI batch export (được đặt lại sau từng batch).
+const exportWriteWindow = 60 * time.Second
+
+// exportCSV xuất danh sách entry ra file CSV theo từng lô, có ghi audit bắt đầu và kết thúc.
 func (h *Handler) exportCSV(w http.ResponseWriter, r *http.Request) {
 	typ := r.URL.Query().Get("type")
 	if typ != "" && typ != "phone" && typ != "url" {
 		typ = ""
 	}
+
+	// C3: ghi audit TRƯỚC khi dữ liệu rời khỏi hệ thống. Nếu không ghi được thì không export.
+	actor := h.actorFrom(r)
+	if err := h.Store.WriteAudit(r.Context(), actor, "entry.export.start", map[string]any{"type": typ}); err != nil {
+		h.Log.Error("export audit", "err", err)
+		http.Error(w, "Không ghi được audit log, export bị từ chối.", http.StatusInternalServerError)
+
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	rows, status := 0, "aborted"
+
+	defer func() {
+		// Dùng context riêng: client ngắt kết nối thì r.Context() đã bị hủy nhưng audit vẫn phải được ghi.
+		_ = h.Store.WriteAudit(context.WithoutCancel(r.Context()), actor, "entry.export.end",
+			map[string]any{"type": typ, "rows": rows, "status": status})
+	}()
 
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="blacklist-export.csv"`)
@@ -363,9 +443,15 @@ func (h *Handler) exportCSV(w http.ResponseWriter, r *http.Request) {
 	var after int64
 
 	for {
+		_ = rc.SetWriteDeadline(time.Now().Add(exportWriteWindow))
+
 		batch, err := h.Store.ExportBatch(r.Context(), typ, after, 10000)
 		if err != nil {
 			h.Log.Error("export", "err", err)
+			if r.Context().Err() == nil {
+				status = "failed" // lỗi thật; còn client ngắt kết nối thì giữ "aborted"
+			}
+
 			return
 		}
 
@@ -384,6 +470,7 @@ func (h *Handler) exportCSV(w http.ResponseWriter, r *http.Request) {
 				csvSafe(e.Source), csvSafe(e.Note), exp, e.CreatedAt.UTC().Format(time.RFC3339)})
 
 			after = e.ID
+			rows++
 		}
 
 		cw.Flush()
@@ -394,5 +481,8 @@ func (h *Handler) exportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cw.Flush()
-	_ = h.Store.WriteAudit(r.Context(), actorFrom(r), "entry.export", map[string]any{"type": typ})
+
+	if cw.Error() == nil {
+		status = "complete"
+	}
 }

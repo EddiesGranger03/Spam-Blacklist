@@ -65,6 +65,13 @@ docker compose -f deploy/docker-compose.yml exec postgres psql -U vsf -d vsf -c 
   ```bash
   TEST_DATABASE_URL='postgres://vsf:vsf@localhost:5433/vsf_test?sslmode=disable' go test ./internal/store/
   ```
+- *Cụm Postgres riêng cho test (khuyến nghị):*
+  ```bash
+  docker compose -f deploy/docker-compose.test.yml up -d --wait
+  TEST_DATABASE_URL='postgres://vsf:vsf@localhost:5544/vsf_test?sslmode=disable' go test -count=1 -p 1 ./...
+  docker compose -f deploy/docker-compose.test.yml down
+  ```
+  `TestChangeLogHeadAndPurge` tự bỏ qua nếu có transaction mở ở nơi khác trong cụm Postgres (đúng hành vi của `Head`, chỉ trả các dòng trước xmin của cả cụm), nên cần cụm riêng này để nó chạy chắc chắn. Chạy với `-p 1` vì các test store dùng chung database `vsf_test`.
 - ⚠️ Test này **xóa sạch mọi bảng** của database được trỏ tới. Nó tự từ chối nếu tên database không kết thúc bằng `_test`. Tuyệt đối không trỏ vào database thật (`vsf`).
 
 **End-to-End test qua HTTP (khi server đang chạy):**
@@ -87,6 +94,10 @@ go run ./cmd/bench -url http://127.0.0.1:8090 -key vsf_... -file data.csv -c 64 
 | `HTTP_ADDR` | `127.0.0.1:8080` | địa chỉ nghe |
 | `DATABASE_URL` | `postgres://vsf:vsf@localhost:5433/vsf?sslmode=disable` | Postgres primary (ghi) |
 | `READ_DATABASE_URL` | (rỗng = dùng primary) | replica cho đường check + changefeed (phải dùng cùng một node) |
+| `TRUSTED_PROXIES` | (rỗng) | Danh sách CIDR/IP reverse proxy, phân cách bằng dấu phẩy (vd `10.0.0.0/8,172.16.0.5`). Chỉ khi kết nối đến từ các địa chỉ này mới đọc `X-Forwarded-For` để lấy IP client (dùng cho throttle đăng nhập, audit, rate limit). Rỗng = luôn dùng địa chỉ kết nối trực tiếp. **Production bắt buộc** đặt biến này hoặc `TRUSTED_PROXIES_NONE=true`, nếu không server từ chối khởi động |
+| `TRUSTED_PROXIES_NONE` | `false` | Chỉ dùng ở production: xác nhận rõ ràng là chạy không qua reverse proxy. Đặt cùng lúc với `TRUSTED_PROXIES` bị từ chối |
+| `METRICS_TOKEN` | (rỗng) | Bearer token cho `/metrics`, tối thiểu 16 ký tự nếu có đặt. Rỗng = `/metrics` chỉ nhận request từ loopback (production ghi cảnh báo khi khởi động). `/readyz` chỉ hiện chi tiết lỗi cho loopback |
+| `REDIS_PASSWORD` | (rỗng) | Mật khẩu Redis (docker-compose dev đặt mặc định `vsf-dev-redis`) |
 | `PG_MAX_CONNS` | `32` | kích thước pool |
 | `REDIS_ADDR` | (rỗng = tắt cache/quota) | Redis |
 | `CACHE_TTL` | `10m` | TTL cache kết quả |
@@ -98,12 +109,14 @@ go run ./cmd/bench -url http://127.0.0.1:8090 -key vsf_... -file data.csv -c 64 
 | `AUDIT_HMAC_KEY` | (dẫn xuất từ `SESSION_SECRET`) | Khóa HMAC nối chuỗi hash cho `audit_logs`. Nên đặt riêng, vì đổi `SESSION_SECRET` sẽ làm không xác minh được bản ghi cũ. Kiểm tra bằng `GET /admin/audit/verify` (admin) |
 | `DATA_KEY` | **bắt buộc** | Bí mật ≥ 32 ký tự để mã hóa AES-256-GCM `value/note/source`. **Mất khóa = mất dữ liệu**, hãy sao lưu riêng khỏi DB |
 | `DATA_PEPPER` | **bắt buộc** | Bí mật ≥ 32 ký tự, khác `DATA_KEY`, dùng cho blind index HMAC (và `value_hash`) |
-| `DATA_KEY_VERSION` | `1` | Số phiên bản khóa, lưu cạnh mỗi bản mã để xoay khóa sau này |
+| `DATA_KEY_VERSION` | `1` | Phiên bản của `DATA_KEY` hiện tại (1 đến 32767). Mỗi dòng lưu phiên bản của khóa đã mã hóa nó (`key_version`) và dùng đúng khóa đó để đọc |
+| `DATA_KEY_V<n>` | – | Khóa **cũ** của phiên bản `<n>` (ví dụ `DATA_KEY_V1`), chỉ để ĐỌC dữ liệu chưa được mã hóa lại. Xem "Xoay khóa mã hóa" |
 | `DEFAULT_REGION` | `VN` | mã quốc gia khi SĐT không có dấu `+` |
 | `BLOOM_EXPECTED_ITEMS` | `10000000` | kích thước Bloom tối thiểu (tự nới theo số dòng ước lượng ×1,3) |
 | `BLOOM_REBUILD_INTERVAL` | `24h` | dựng lại Bloom định kỳ |
 | `POLL_INTERVAL` | `1s` | tần suất đọc `change_log` |
-| `RATE_LIMIT_RPS` | `100` | giới hạn mặc định mỗi key |
+| `RATE_LIMIT_RPS` | `100` | giới hạn mặc định mỗi key; có `REDIS_ADDR` thì bộ đếm nằm ở Redis, dùng chung mọi instance (Redis lỗi thì cho qua), không có Redis thì đếm trong bộ nhớ từng instance |
+| `DATA_PEPPER_OLD` | – | chỉ cho `cmd/rotate-pepper`: pepper mà dữ liệu đang lưu dưới nó, xem "Xoay DATA_PEPPER" |
 
 ## Mã hóa dữ liệu lưu trữ
 
@@ -112,4 +125,40 @@ go run ./cmd/bench -url http://127.0.0.1:8090 -key vsf_... -file data.csv -c 64 
 - Khóa nằm trong biến môi trường `DATA_KEY`, `DATA_PEPPER`. Với `start.bat`, đặt chúng trong file `.env.local.bat` (đã nằm trong `.gitignore`, không commit): `set DATA_KEY=...` và `set DATA_PEPPER=...`.
 - Lần khởi động đầu tiên sau khi nâng cấp tự chuyển bảng cũ sang bảng mã hóa trong **một transaction** (khoảng 15 giây cho ~1 triệu dòng): sao chép, xác minh số dòng và mẫu giải mã, rồi mới đổi tên bảng và xóa bảng plaintext. Lỗi bất kỳ thì rollback, bảng cũ còn nguyên. Hãy `pg_dump` trước khi nâng cấp.
 - Audit log, cache Redis và inspector đều không chứa giá trị gốc (che hoặc mã hóa).
-- Muốn đổi khóa: tăng `DATA_KEY_VERSION` (chưa có công cụ re-encrypt tự động, cần viết thêm trước khi xoay khóa thật).
+- **Khi khởi động, server tự kiểm tra khóa** trên một mẫu dữ liệu thật (125 dòng: cũ nhất, mới nhất, vài chỗ ngẫu nhiên; 38 ms với 1 triệu dòng) và **từ chối chạy** nếu khóa cấu hình không đọc được dữ liệu: thiếu `DATA_KEY_V<n>`, sai `DATA_KEY`, hoặc sai `DATA_PEPPER` (sai pepper làm mọi tra cứu hỏng một cách âm thầm, nên được chặn ngay lúc khởi động).
+
+## Xoay khóa mã hóa
+
+Chỉ xoay được `DATA_KEY`. **Không** có công cụ xoay `DATA_PEPPER` (nó đổi `value_hash`/`value_blind` của mọi dòng); server chỉ phát hiện và chặn khởi động khi pepper bị đổi nhầm.
+
+Mỗi dòng có **một** `key_version` cho cả ba cột `value_enc`, `note_enc`, `source_enc`. Đổi `DATA_KEY` mà không làm các bước dưới đây thì server từ chối khởi động (trước đây nó vẫn khởi động rồi trả lỗi 500 ở `/v1/check`).
+
+1. **Sao lưu** (`pg_dump`) và sao lưu riêng **cả hai khóa**, ngoài DB.
+2. Khai báo khóa mới và giữ khóa cũ, rồi khởi động lại server (giả sử khóa đang dùng là phiên bản 1):
+   ```
+   DATA_KEY=<khóa mới>
+   DATA_KEY_VERSION=2
+   DATA_KEY_V1=<khóa cũ>
+   ```
+   Từ lúc này dòng mới và dòng được sửa hoặc import lại được mã hóa bằng khóa mới; dòng cũ vẫn đọc được. Server báo cảnh báo "some rows are still sealed under an older key".
+3. Mã hóa lại dòng cũ bằng `rekey`, **chạy với đúng biến môi trường của server**, được phép chạy khi server đang chạy và chạy lại được nếu bị ngắt:
+   ```
+   go run ./cmd/rekey -status     # số dòng theo từng phiên bản khóa (quét cả bảng)
+   go run ./cmd/rekey -dry-run    # giải mã thử mọi dòng sẽ đổi, không ghi gì
+   go run ./cmd/rekey             # mã hóa lại
+   ```
+   Đo thật: 1 triệu dòng mất khoảng 27 giây (~37.000 dòng/giây); 9,76 triệu dòng mất khoảng 29 phút (~5.600 dòng/giây), tức chậm hơn trên mỗi dòng khi bảng lớn hơn bộ nhớ đệm, nên không ngoại suy tuyến tính. `rekey` chỉ đổi bản mã và `key_version`, không đổi nội dung, `value_hash`, `value_blind` hay `updated_at`.
+4. Khi `rekey -status` cho thấy **không còn dòng nào** ở phiên bản cũ thì mới bỏ `DATA_KEY_V1`.
+
+**Cảnh báo:** các bản sao lưu làm *trước* khi xoay khóa vẫn mã hóa bằng khóa cũ. Hãy giữ khóa cũ chừng nào còn có thể cần khôi phục từ chúng. Mất khóa là mất dữ liệu, không công cụ nào cứu được.
+
+## Xoay DATA_PEPPER
+
+Pepper khóa blind index (`value_blind`, `value_hash`) của **mọi** dòng, nên khác với xoay `DATA_KEY`, **phải dừng toàn bộ server** trong lúc xoay: server chạy pepper cũ không tìm thấy dòng đã xoay và sẽ báo số bị chặn là an toàn.
+
+1. `pg_dump` và sao lưu cả hai pepper ngoài DB. **Dừng mọi instance.**
+2. Đặt `DATA_PEPPER=<pepper mới>` và `DATA_PEPPER_OLD=<pepper hiện tại>`, cùng các biến còn lại như server.
+3. `go run ./cmd/rotate-pepper -dry-run` (giải mã và kiểm tra mọi dòng, không ghi), rồi `go run ./cmd/rotate-pepper -servers-stopped`. Chạy lại được nếu bị ngắt. Đo thật: 300 nghìn dòng mất khoảng 6 giây.
+4. Khởi động lại các instance với `DATA_PEPPER` mới (Bloom filter tự dựng lại). Giữ pepper cũ chừng nào còn cần khôi phục từ bản sao lưu trước khi xoay.
+
+Server cấu hình pepper mới trước khi xoay sẽ từ chối khởi động.

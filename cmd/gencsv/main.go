@@ -9,6 +9,7 @@ import (
 	"os"
 )
 
+// main sinh file CSV dữ liệu giả để test import.
 func main() {
 	n := flag.Int("n", 1000000, "số dòng")
 	out := flag.String("out", "data.csv", "file đầu ra")
@@ -25,7 +26,7 @@ func main() {
 	w := bufio.NewWriterSize(f, 1<<20)
 	defer w.Flush()
 
-	rng := rand.New(rand.NewSource(*seed))
+	rng := rand.New(rand.NewSource(*seed))  // #nosec G404 -- sinh dữ liệu giả để test, cần tái lập được theo seed
 	cats := []string{"spam", "scam", "phishing", "malware", "telemarketing"}
 	fmt.Fprintln(w, "type,value,match_type,category,risk_score,source,note")
 

@@ -48,6 +48,7 @@ type Inspector struct {
 	seq      uint64
 }
 
+// New tạo Inspector giữ tối đa capacity bản ghi gần nhất.
 func New(capacity int) *Inspector {
 	if capacity <= 0 {
 		capacity = 200
@@ -58,6 +59,7 @@ func New(capacity int) *Inspector {
 	}
 }
 
+// Record thêm một request vào bộ đệm vòng gần nhất của Inspector.
 func (ins *Inspector) Record(r Record) {
 	ins.mu.Lock()
 	defer ins.mu.Unlock()
@@ -79,12 +81,14 @@ func (ins *Inspector) Record(r Record) {
 	}
 }
 
+// Clear xóa toàn bộ bản ghi trong Inspector.
 func (ins *Inspector) Clear() {
 	ins.mu.Lock()
 	defer ins.mu.Unlock()
 	ins.records = ins.records[:0]
 }
 
+// GetRecent trả về các bản ghi gần nhất, lọc theo method, status, từ khóa và màn hình.
 func (ins *Inspector) GetRecent(limit int, method, status, search, screen string) []Record {
 	ins.mu.RLock()
 	defer ins.mu.RUnlock()
@@ -146,6 +150,7 @@ func (ins *Inspector) GetRecent(limit int, method, status, search, screen string
 	return matches
 }
 
+// GetByID tìm một bản ghi theo ID; trả nil nếu không có.
 func (ins *Inspector) GetByID(id uint64) *Record {
 	ins.mu.RLock()
 	defer ins.mu.RUnlock()
@@ -159,6 +164,7 @@ func (ins *Inspector) GetByID(id uint64) *Record {
 	return nil
 }
 
+// GetStats thống kê các bản ghi (số lượng, thời gian, trạng thái), có thể giới hạn theo màn hình.
 func (ins *Inspector) GetStats(screen string) Stats {
 	ins.mu.RLock()
 	defer ins.mu.RUnlock()
@@ -214,6 +220,7 @@ func (ins *Inspector) GetStats(screen string) Stats {
 	}
 }
 
+// formatDuration định dạng thời lượng để hiển thị (µs, ms hoặc s).
 func formatDuration(d time.Duration) string {
 	if d < time.Millisecond {
 		return fmt.Sprintf("%dµs", d.Microseconds())
@@ -224,6 +231,7 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%.2fs", d.Seconds())
 }
 
+// ExtractHeaders chọn một danh sách header cố định của request (Content-Type, User-Agent, ...) để hiển thị.
 func ExtractHeaders(h http.Header) map[string]string {
 	res := make(map[string]string)
 	keys := []string{
@@ -255,8 +263,8 @@ func ExtractHeaders(h http.Header) map[string]string {
 
 var sensitiveField = regexp.MustCompile(`(?i)((?:password|passwd|pass|token|csrf[_-]?token|api[_-]?key|secret|key)["']?\s*[=:]\s*"?)([^&"\s,}]+)`)
 
-// RedactBody hides credentials before a request body is stored.
-// Login bodies are dropped entirely; other bodies have sensitive fields masked.
+// RedactBody che thông tin nhạy cảm trước khi body request được lưu.
+// Body đăng nhập bị bỏ hẳn; các body khác có trường nhạy cảm được che.
 func RedactBody(path, body string) string {
 	if body == "" {
 		return ""
@@ -268,27 +276,30 @@ func RedactBody(path, body string) string {
 }
 
 var (
-	// Query/form parameters that carry the data being checked (phone, URL).
+	// Tham số query/form mang dữ liệu đang được kiểm tra (số điện thoại, URL).
 	valueParam = regexp.MustCompile(`(?i)((?:^|[&?])(?:value|q|phone|url|number)=)([^&]{3})[^&]*`)
-	// Digit runs long enough to be a phone number, with an optional leading +.
+	// Chuỗi chữ số đủ dài để là số điện thoại, với dấu + tùy chọn ở đầu.
 	phoneRun = regexp.MustCompile(`(\+?\d{3})\d{3,}(\d{2})`)
+	// Trường JSON mang dữ liệu đang kiểm tra: "value": "http://evil.example/x" (M5). Giữ 3 ký tự đầu như valueParam.
+	jsonValue = regexp.MustCompile(`(?i)("(?:value|q|phone|url|number|domain|host)"\s*:\s*")([^"\\]{0,3})(?:[^"\\]|\\.)*"`)
 )
 
-// MaskSensitive hides the data a request is about, so the inspector shows that
-// a lookup happened without storing the phone number or URL itself.
+// MaskSensitive che dữ liệu mà request đang nói tới, để Inspector cho thấy
+// đã có một lượt tra cứu mà không lưu chính số điện thoại hoặc URL.
 func MaskSensitive(s string) string {
 	if s == "" {
 		return s
 	}
 
 	s = valueParam.ReplaceAllString(s, "${1}${2}***")
+	s = jsonValue.ReplaceAllString(s, `${1}${2}***"`)
 
 	return phoneRun.ReplaceAllString(s, "${1}***${2}")
 }
 
-// ScreenOf returns the page ("screen") a request belongs to.
-// HTMX sub-requests belong to the page that triggered them (HX-Current-URL,
-// falling back to Referer); every other request belongs to its own path.
+// ScreenOf trả về trang ("screen") mà một request thuộc về.
+// Request HTMX thuộc về trang đã kích hoạt nó (HX-Current-URL, rồi tới Referer);
+// mọi request khác thuộc về chính đường dẫn của nó.
 func ScreenOf(r *http.Request) string {
 	if r.Header.Get("HX-Request") == "true" {
 		for _, h := range []string{"HX-Current-URL", "Referer"} {
