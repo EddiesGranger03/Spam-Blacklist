@@ -410,13 +410,13 @@ Không đưa ra con số RPS/latency khi chưa đo trên phần cứng mục ti�
 ---
 
 ## Checklist kiểm chứng cuối
-- [ ] `go vet ./...`, `govulncheck ./...`, `go test ./... -race` xanh.
-- [ ] Thêm entry → check ngay (cùng instance) trả `true`; xoá → trả `false`; 2 instance: thêm ở A, B thấy trong ≤ poll interval.
-- [ ] Test commit lệch thứ tự (2 transaction) không làm Bloom sót hash.
-- [ ] Domain `evil.com` chặn `http://a.evil.com/x?utm_source=1`; prefix `evil2.com/shop` không chặn `/blog`.
-- [ ] `0901234567`, `+84901234567`, `+1 415 555 2671` được chuẩn hoá đúng; số quốc tế không bị gán nhầm +84.
-- [ ] Entry hết hạn không còn bị chặn.
-- [ ] API key: sai/thu hồi/hết hạn/xoay/rate limit/quota đều đúng; `AuthDisabled` bị từ chối khi `AppEnv=production` hoặc bind `0.0.0.0`.
-- [ ] RBAC: viewer không ghi được; editor không vào được users/apikeys. CSRF: POST thiếu token → 403.
-- [ ] Import 1M dòng báo đúng mới/cập nhật/lỗi. Audit log ghi đủ mọi thao tác.
-- [ ] Benchmark báo cáo theo Bước 13.
+- [x] `go vet ./...`, `govulncheck ./...`, `go test ./... -race` xanh.
+- [x] Thêm entry → check ngay (cùng instance) trả `true`; xoá → trả `false`; 2 instance: thêm ở A, B thấy trong ≤ poll interval.
+- [x] Test commit lệch thứ tự (2 transaction) không làm Bloom sót hash.
+- [x] Domain `evil.com` chặn `http://a.evil.com/x?utm_source=1`; prefix `evil2.com/shop` không chặn `/blog`.
+- [x] `0901234567`, `+84901234567`, `+1 415 555 2671` được chuẩn hoá đúng; số quốc tế không bị gán nhầm +84.
+- [x] Entry hết hạn không còn bị chặn.
+- [x] API key: sai/thu hồi/hết hạn/xoay/rate limit/quota đều đúng; `AuthDisabled` bị từ chối khi `AppEnv=production` hoặc bind `0.0.0.0`.
+- [x] RBAC: viewer không ghi được; editor không vào được users/apikeys. CSRF: POST thiếu token → 403.
+- [x] Import 1M dòng báo đúng mới/cập nhật/lỗi. Audit log ghi đủ mọi thao tác.
+- [ ] Benchmark báo cáo theo Bước 13 (chưa làm dược do phải chạy nhiều máy trên 1 máy (one for all) và dung lượng bộ nhớ không đủ để test được 100M bản ghi).

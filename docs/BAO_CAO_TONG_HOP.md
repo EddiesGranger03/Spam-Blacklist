@@ -470,7 +470,7 @@ Với n = 1, 2, 3, ... cho tới khi thao tác chạy xong mà không bị đứ
 
 Số đo cuối: toàn repo **88,2%** (`store` 89,9%, `handler` 86,5%, `changefeed` 85,4%, `cmd/server` 92,1%).
 
-### Còn lại, nói thẳng
+### Chưa làm được
 - `TestChangeLogHeadAndPurge`: tự bỏ qua khi có transaction mở ở nơi khác trong cụm Postgres. Đó là hành vi đúng của `Head` (chỉ trả các dòng trước xmin của cả cụm); muốn chạy chắc chắn cần một cụm Postgres riêng cho test.
 - `cmd/server`, `store`, `handler`: lỗi mạng giữa hai câu lệnh đã được phủ ở vòng 5; phần chưa phủ còn lại là các nhánh lỗi hiếm (ví dụ hết thời gian chờ chậm, mất gói, Redis) mà proxy hiện tại không mô phỏng.
 - Phép thử đột biến toàn bộ mới khoảng 30 lỗi chèn tay, không phải toàn bộ mã nguồn. Coverage đo dòng lệnh, không chứng minh test mạnh.
