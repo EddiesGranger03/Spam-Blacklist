@@ -11,7 +11,7 @@
 
 | # | Nhiệm vụ | Trạng thái |
 |---|---|---|
-| 1 | Debug, tìm lỗi nghiêm trọng và vá | Xong. Đã vá C1 đến C5, M1 đến M10 và A1. |
+| 1 | Debug, tìm lỗi nghiêm trọng và vá | Xong |
 | 2 | Loadtest các API hotpath, có số liệu đo trên máy | Xong. Đã tìm điểm nghẽn và đo trước và sau khi sửa. |
 | 3 | Tấn công API public, đề xuất phòng chống | Xong. Đã thử 10 kịch bản, vá các lỗi phát hiện được. Mọi đề xuất đều đã có trạng thái (mục 3.6). |
 
