@@ -191,6 +191,8 @@ WHERE e.expires_at IS NULL OR e.expires_at > now()
 
 ## Bước 6 — Bloom filter + Changefeed
 
+> **Cập nhật (thiết kế hiện tại):** phần Bloom đơn + rebuild từng pod mô tả bên dưới là thiết kế ban đầu. Code hiện tại dùng **filter 3 lớp** (`internal/filter`: binary fuse tĩnh + delta Bloom + tập `removed` chính xác), **snapshot** lưu trong Postgres (`internal/snapshot`, `store/filtersnap.go`) để pod mới không quét bảng, **leader** bằng advisory lock, và **Redis Pub/Sub** chỉ như tín hiệu tăng tốc trên nền `change_log` (vẫn là nguồn sự thật). Xem [docs/LUONG_VA_DANH_MUC_HAM.md](docs/LUONG_VA_DANH_MUC_HAM.md), [docs/RUNBOOK.md](docs/RUNBOOK.md) và số đo ở [docs/SCALE_TEST.md](docs/SCALE_TEST.md). Các nguyên tắc dưới đây (không false negative, `xid` + `pending`, `change_log` bền vững) vẫn đúng.
+
 ### 6.1 `internal/bloom/bloom.go`
 ```go
 type Filter struct { bits []uint64; m uint64; k uint64 }
@@ -213,7 +215,7 @@ Vì sao cần `pending`: entry thêm trong lúc đang quét DB có thể bị qu
 
 ### 6.3 `internal/changefeed/` — đồng bộ nhiều instance
 Vấn đề: chạy 3 instance, admin thêm entry ở instance A thì Bloom/cache của B, C phải biết.
-Cách đề xuất (thay cho Redis pub/sub vì **pub/sub có thể mất tin → Bloom sót → false negative**): dùng bảng `change_log` ở DB (mẫu *transactional outbox*: ghi sự kiện cùng transaction với dữ liệu nên không thể "ghi entry mà mất sự kiện").
+Cách đề xuất (**không** dùng Redis pub/sub làm nguồn sự thật vì nó có thể mất tin → Bloom sót → false negative; hiện tại Pub/Sub chỉ được thêm như tín hiệu tăng tốc, mất tin thì safety poll bù): dùng bảng `change_log` ở DB (mẫu *transactional outbox*: ghi sự kiện cùng transaction với dữ liệu nên không thể "ghi entry mà mất sự kiện").
 - Mỗi lần ghi entry → ghi 1 dòng `change_log(value_hash)` trong cùng transaction.
 - **Cạm bẫy nghiêm trọng:** `BIGSERIAL` cấp số lúc INSERT chứ không phải lúc COMMIT. Transaction A lấy seq=5, transaction B lấy seq=6 và commit trước; poller đọc thấy 6, đặt `lastSeq=6`, rồi A commit seq=5 → **sự kiện 5 bị bỏ sót vĩnh viễn** (Bloom thiếu hash → trả "safe" sai). Cách đúng: chỉ đọc các dòng thuộc transaction *đã chắc chắn kết thúc*:
   ```sql
@@ -390,7 +392,7 @@ Replica luôn trễ một chút. Nếu Bloom được cập nhật từ primary 
 
 ### 12.3 Không để false negative do Bloom
 - Bloom thiếu hash ⇒ sai. Các lớp bảo vệ: (a) outbox `change_log` bền vững + đọc theo `xid` (Bước 6.3); (b) chưa sẵn sàng ⇒ `Test()` trả `true` + `/readyz` 503; (c) rebuild định kỳ với `pending` buffer; (d) **job đối chiếu** chạy nền: lấy mẫu ngẫu nhiên 100k hash từ DB, kiểm tra `Test()`; bất kỳ lần nào trả `false` ⇒ báo động (metric `bloom_false_negative_total` phải luôn = 0) và kích hoạt rebuild.
-- Startup chậm do quét 300M hash: tối ưu sau khi benchmark bằng cách lưu **snapshot Bloom** (file/object storage) kèm con trỏ `(xid, seq)`; instance mới nạp snapshot rồi đuổi theo `change_log`. Chỉ làm khi số đo cho thấy cần.
+- Startup chậm do quét hàng trăm triệu hash: **đã làm** bằng snapshot filter trong Postgres kèm con trỏ `(xid, seq)`; pod mới tải snapshot rồi đuổi theo `change_log` (10M hash: 0,1 s thay vì 12 s quét, 0 dòng đọc từ `blacklist_entries`; xem docs/SCALE_TEST.md).
 - Dọn `change_log` chỉ xoá dòng quá cũ **và** đã nằm sau con trỏ của mọi instance (hoặc giữ ≥ 24h); instance nghỉ lâu hơn mức giữ thì bắt buộc rebuild toàn bộ.
 
 ### 12.4 Bảo mật & vận hành

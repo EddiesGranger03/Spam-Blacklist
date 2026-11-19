@@ -1,0 +1,5 @@
+=== RUN   TestScaleBigScanOnly
+    big_test.go:153: SCAN ONLY: 98000000 BLACKLIST hashes (xor cc646951795b2a06) in 1m19s = 1.25 M rows/s; Go peak above baseline 5.2 MB; blacklist_entries: 10034 queries, 98956280 rows read
+--- PASS: TestScaleBigScanOnly (82.32s)
+PASS
+ok  	vsf/internal/scaletest	82.528s

@@ -1,7 +1,7 @@
 # VSF – Spam Blacklist (số điện thoại + URL)
 
 Backend Go quản lý danh sách SĐT/URL có nguy cơ spam, có **Admin Portal** (HTMX) và **Check API**
-tối ưu cho hàng trăm triệu bản ghi (Bloom filter + Redis + PostgreSQL partition).
+tối ưu cho hàng trăm triệu bản ghi (filter 3 lớp trong RAM + snapshot trong Postgres + Redis + PostgreSQL partition).
 
 ## Chạy nhanh (development)
 
@@ -86,6 +86,11 @@ go run ./cmd/gencsv -n 1000000 -out data.csv          # sinh dữ liệu giả �
 go run ./cmd/bench -url http://127.0.0.1:8090 -key vsf_... -file data.csv -c 64 -d 20s -hit 0.1
 ```
 
+## Vận hành và đo quy mô
+
+- [docs/RUNBOOK.md](docs/RUNBOOK.md): deploy, snapshot hỏng, Redis down, rebuild thủ công, cấu hình đồng bộ.
+- [docs/SCALE_TEST.md](docs/SCALE_TEST.md): số đo filter/khởi động/chaos ở 10 triệu dòng, phần nào đo thật, phần nào ngoại suy. Chạy lại: `scripts/scale-test.sh` (test nặng, build tag `scale`, CI thường không chạy).
+
 ## Biến môi trường
 
 | Biến | Mặc định | Ý nghĩa |
@@ -112,15 +117,23 @@ go run ./cmd/bench -url http://127.0.0.1:8090 -key vsf_... -file data.csv -c 64 
 | `DATA_KEY_VERSION` | `1` | Phiên bản của `DATA_KEY` hiện tại (1 đến 32767). Mỗi dòng lưu phiên bản của khóa đã mã hóa nó (`key_version`) và dùng đúng khóa đó để đọc |
 | `DATA_KEY_V<n>` | – | Khóa **cũ** của phiên bản `<n>` (ví dụ `DATA_KEY_V1`), chỉ để ĐỌC dữ liệu chưa được mã hóa lại. Xem "Xoay khóa mã hóa" |
 | `DEFAULT_REGION` | `VN` | mã quốc gia khi SĐT không có dấu `+` |
-| `BLOOM_EXPECTED_ITEMS` | `10000000` | kích thước Bloom tối thiểu (tự nới theo số dòng ước lượng ×1,3) |
-| `BLOOM_REBUILD_INTERVAL` | `24h` | dựng lại Bloom định kỳ |
-| `POLL_INTERVAL` | `1s` | tần suất đọc `change_log` |
+| `BLOOM_EXPECTED_ITEMS` | `10000000` | gợi ý dung lượng cho lần quét bảng đầu tiên (không còn là giới hạn; lớp static là binary fuse ~1,13 byte/hash) |
+| `BLOOM_REBUILD_INTERVAL` | `24h` | **Không còn dùng.** Filter làm mới qua snapshot (`FILTER_SNAPSHOT_INTERVAL`) |
+| `POLL_INTERVAL` | `1s` | tần suất đọc `change_log` khi **không có** Redis Pub/Sub (không cấu hình `REDIS_ADDR`, hoặc Redis đang mất): đây là độ trễ đồng bộ tối đa giữa các pod lúc đó |
+| `SAFETY_POLL_INTERVAL` | `30s` | khi đang subscribe Redis: poll `change_log` thưa chừng này chỉ để bắt message Pub/Sub bị mất (cận trên độ trễ khi mất message) |
+| `SYNC_CHANNEL` | `vsf:changes` | kênh Redis Pub/Sub báo thay đổi giữa các pod; đổi khi nhiều môi trường dùng chung một Redis |
+| `FILTER_SNAPSHOT_INTERVAL` | `1h` | leader dựng snapshot filter mới (quét bảng một lần) mỗi chừng này; snapshot được lưu trong Postgres |
+| `FILTER_SNAPSHOT_POLL` | `30s` | chu kỳ mỗi pod tìm snapshot mới và thử giành quyền leader (advisory lock `727275`) |
+| `FILTER_SNAPSHOT_KEEP` | `3` | số snapshot giữ lại |
+| `FILTER_BOOTSTRAP_TIMEOUT` | `10m` | pod chờ snapshot của leader quá lâu thì ghi log lỗi mỗi chừng này (vẫn chờ, `/readyz` 503) |
+| `FILTER_RETRY_BASE` / `FILTER_RETRY_MAX` | `5s` / `10m` | backoff mũ (có jitter) sau lần dựng/lưu snapshot lỗi; `Save` lỗi thì chỉ thử lại Save, không quét lại bảng |
+| `FILTER_SCAN_BATCH` / `FILTER_SCAN_PAUSE` | `10000` / `2ms` | số dòng mỗi trang và thời gian nghỉ giữa các trang khi leader quét bảng (giảm tải DB) |
 | `RATE_LIMIT_RPS` | `100` | giới hạn mặc định mỗi key; có `REDIS_ADDR` thì bộ đếm nằm ở Redis, dùng chung mọi instance (Redis lỗi thì cho qua), không có Redis thì đếm trong bộ nhớ từng instance |
 | `DATA_PEPPER_OLD` | – | chỉ cho `cmd/rotate-pepper`: pepper mà dữ liệu đang lưu dưới nó, xem "Xoay DATA_PEPPER" |
 
 ## Mã hóa dữ liệu lưu trữ
 
-- `blacklist_entries` không còn cột plaintext: `value_enc`, `note_enc`, `source_enc` là AES-256-GCM; tra cứu dùng `value_blind` = HMAC-SHA256(pepper, type|match_type|value); `value_hash` (khóa partition và Bloom filter) là 8 byte đầu của blind index nên không dò ngược được số điện thoại.
+- `blacklist_entries` không còn cột plaintext: `value_enc`, `note_enc`, `source_enc` là AES-256-GCM; tra cứu dùng `value_blind` = HMAC-SHA256(pepper, type|match_type|value); `value_hash` (khóa partition và filter) là 8 byte đầu của blind index nên không dò ngược được số điện thoại.
 - Mọi kiểu khớp (`exact`/`prefix`/`domain`) vẫn hoạt động vì checker chỉ so sánh bằng (đẳng thức) trên các candidate key.
 - Khóa nằm trong biến môi trường `DATA_KEY`, `DATA_PEPPER`. Với `start.bat`, đặt chúng trong file `.env.local.bat` (đã nằm trong `.gitignore`, không commit): `set DATA_KEY=...` và `set DATA_PEPPER=...`.
 - Lần khởi động đầu tiên sau khi nâng cấp tự chuyển bảng cũ sang bảng mã hóa trong **một transaction** (khoảng 15 giây cho ~1 triệu dòng): sao chép, xác minh số dòng và mẫu giải mã, rồi mới đổi tên bảng và xóa bảng plaintext. Lỗi bất kỳ thì rollback, bảng cũ còn nguyên. Hãy `pg_dump` trước khi nâng cấp.
@@ -159,6 +172,6 @@ Pepper khóa blind index (`value_blind`, `value_hash`) của **mọi** dòng, n�
 1. `pg_dump` và sao lưu cả hai pepper ngoài DB. **Dừng mọi instance.**
 2. Đặt `DATA_PEPPER=<pepper mới>` và `DATA_PEPPER_OLD=<pepper hiện tại>`, cùng các biến còn lại như server.
 3. `go run ./cmd/rotate-pepper -dry-run` (giải mã và kiểm tra mọi dòng, không ghi), rồi `go run ./cmd/rotate-pepper -servers-stopped`. Chạy lại được nếu bị ngắt. Đo thật: 300 nghìn dòng mất khoảng 6 giây.
-4. Khởi động lại các instance với `DATA_PEPPER` mới (Bloom filter tự dựng lại). Giữ pepper cũ chừng nào còn cần khôi phục từ bản sao lưu trước khi xoay.
+4. Xóa snapshot filter cũ (`DELETE FROM filter_snapshots;`: hash đã đổi nên snapshot cũ không còn dùng được), rồi khởi động lại các instance với `DATA_PEPPER` mới: leader quét bảng và dựng snapshot mới, xem [docs/RUNBOOK.md](docs/RUNBOOK.md) mục 2. Giữ pepper cũ chừng nào còn cần khôi phục từ bản sao lưu trước khi xoay.
 
 Server cấu hình pepper mới trước khi xoay sẽ từ chối khởi động.

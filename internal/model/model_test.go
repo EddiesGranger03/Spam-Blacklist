@@ -61,3 +61,17 @@ func TestEntryInputValidate(t *testing.T) {
 		}
 	}
 }
+
+func TestEntryInputValidateStatus(t *testing.T) {
+	for _, st := range []string{"", StatusBlacklist, StatusWhitelist} {
+		in := EntryInput{Status: st, RiskScore: 1}
+		if err := in.Validate(); err != nil {
+			t.Errorf("status %q: %v", st, err)
+		}
+	}
+
+	in := EntryInput{Status: "whitelist", RiskScore: 1}
+	if err := in.Validate(); !errors.Is(err, normalize.ErrInvalid) {
+		t.Errorf("lowercase/unknown status must be rejected, got %v", err)
+	}
+}

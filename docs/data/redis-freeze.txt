@@ -1,0 +1,13 @@
+before freeze: reader vsf_sync_subscribed=1
+  [baseline] write=7ms visible-at-reader=11ms
+  [baseline] write=5ms visible-at-reader=7ms
+  [baseline] write=4ms visible-at-reader=6ms
+  [baseline] write=5ms visible-at-reader=7ms
+  [baseline] write=4ms visible-at-reader=7ms
+redis FROZEN (docker pause) at t=0 (11:14:14.481)
+redis UNPAUSED at t=1m1.405s
+reader detected loss of Pub/Sub (subscribed=0) after: 10.031s (0 = never)
+writes during freeze: write latency n=18 p50=105.9ms p90=107.1ms p99=107.3ms max=107.3ms ; write failures=0
+visibility at reader during freeze (write->check true): n=18 p50=996.9ms p90=1.0172s p99=9.7814s max=9.7814s
+reader re-subscribed after unpause: 3ms ; vsf_sync_fallback_total 0 -> 1
+visibility after recovery: n=10 p50=9.3ms p90=11.6ms p99=11.6ms max=11.6ms

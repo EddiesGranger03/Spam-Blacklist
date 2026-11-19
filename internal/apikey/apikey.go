@@ -7,11 +7,13 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	mrand "math/rand/v2"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 
 	"vsf/internal/metrics"
@@ -106,6 +108,8 @@ type Store interface {
 type cacheEntry struct {
 	key    *model.APIKey
 	loaded time.Time
+	// ttl có jitter 80–100% TTL danh nghĩa để các key nạp cùng lúc không hết hạn cùng một thời điểm.
+	ttl time.Duration
 }
 
 type limiterEntry struct {
@@ -125,6 +129,9 @@ type Service struct {
 	limiters   map[int64]limiterEntry
 	used       map[int64]struct{}
 	ipLimiters map[string]*rate.Limiter
+
+	// flights gộp các lần tra DB đồng thời của cùng một prefix thành một (F8).
+	flights singleflight.Group
 }
 
 // NewService tạo dịch vụ API key với store, Redis (có thể nil) và RPS mặc định.
@@ -174,13 +181,7 @@ func (s *Service) lookup(ctx context.Context, prefix, ip string) (*model.APIKey,
 	s.mu.Lock()
 
 	if e, ok := s.cache[prefix]; ok {
-		ttl := cacheTTL
-
-		if e.key == nil {
-			ttl = negativeTTL
-		}
-
-		if s.now().Sub(e.loaded) < ttl {
+		if s.now().Sub(e.loaded) < e.ttl {
 			s.mu.Unlock()
 			return e.key, nil
 		}
@@ -188,11 +189,39 @@ func (s *Service) lookup(ctx context.Context, prefix, ip string) (*model.APIKey,
 
 	s.mu.Unlock()
 
-	// Chỉ tới đây mới thật sự cần tra Postgres (cache-miss). Giới hạn theo IP ngay trước khi tra,
-	// để một caller liên tục đổi prefix (bỏ qua được cache âm) không thể dội request vào DB.
-	if !s.allowLookup(ctx, ip) {
-		return nil, ErrTooManyAuthAttempts
+	// Chỉ tới đây mới thật sự cần tra Postgres (cache-miss). Các request đồng thời cùng prefix được gộp thành một
+	// lần tra (single-flight, F8): chỉ người dẫn đầu bị tính vào giới hạn IP, nên một key thật khi cache hết hạn
+	// không còn bị 429 oan. Kết quả chia sẻ chỉ là bản ghi key theo prefix; so khớp hash đầy đủ vẫn làm riêng
+	// cho từng request ở Authenticate, nên key sai không thể ăn theo key đúng. Prefix khác nhau là flight khác nhau,
+	// mỗi flight vẫn bị tính giới hạn IP như cũ.
+	v, err, shared := s.flights.Do(prefix, func() (any, error) {
+		if !s.allowLookup(ctx, ip) {
+			return nil, ErrTooManyAuthAttempts
+		}
+
+		return s.load(ctx, prefix)
+	})
+	if err != nil && shared && errors.Is(err, ErrTooManyAuthAttempts) {
+		// Người dẫn đầu (có thể là IP khác) bị giới hạn: không để người đi theo chịu thay, tự kiểm tra theo IP của mình.
+		if !s.allowLookup(ctx, ip) {
+			return nil, ErrTooManyAuthAttempts
+		}
+
+		return s.load(ctx, prefix)
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return v.(*model.APIKey), nil
+}
+
+// load tra Postgres theo prefix và ghi cache (kể cả cache âm). Tách khỏi ctx của người gọi để người dẫn đầu bị hủy
+// không làm hỏng những người đi theo.
+func (s *Service) load(ctx context.Context, prefix string) (*model.APIKey, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 
 	k, err := s.store.GetAPIKeyByPrefix(ctx, prefix)
 	var ptr *model.APIKey
@@ -208,13 +237,22 @@ func (s *Service) lookup(ctx context.Context, prefix, ip string) (*model.APIKey,
 		return nil, err
 	}
 
+	ttl := cacheTTL
+	if ptr == nil {
+		ttl = negativeTTL
+	}
+
+	// Jitter chỉ RÚT NGẮN TTL (80–100%): key bị thu hồi phải hết hiệu lực trong tối đa cacheTTL như đã cam kết,
+	// nên không được kéo dài quá TTL danh nghĩa.
+	ttl = time.Duration(float64(ttl) * (0.8 + 0.2*mrand.Float64()))
+
 	s.mu.Lock()
 
 	if len(s.cache) > 100_000 {
 		s.cache = map[string]cacheEntry{}
 	}
 
-	s.cache[prefix] = cacheEntry{key: ptr, loaded: s.now()}
+	s.cache[prefix] = cacheEntry{key: ptr, loaded: s.now(), ttl: ttl}
 	s.mu.Unlock()
 	return ptr, nil
 }

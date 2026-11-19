@@ -3,7 +3,10 @@
   <div class="flash err">{{.Data.Err}}</div>
 {{else}}
   {{with .Data.Result}}
-    {{if .Blacklisted}}
+    {{if .Whitelisted}}
+      <div class="flash ok"><strong>WHITELIST</strong> – ngoại lệ, không bị chặn ({{.Match.Category}}, risk {{.Match.RiskScore}})</div>
+      <p>Khớp entry <strong>#{{.Match.EntryID}}</strong> ({{.Match.MatchType}}: <span class="mono">{{.Match.MatchedValue}}</span>)</p>
+    {{else if .Blacklisted}}
       <div class="flash err"><strong>BỊ BLACKLIST</strong> – {{.Match.Category}}, risk {{.Match.RiskScore}}</div>
       <p>Khớp entry <strong>#{{.Match.EntryID}}</strong> ({{.Match.MatchType}}: <span class="mono">{{.Match.MatchedValue}}</span>)</p>
     {{else}}

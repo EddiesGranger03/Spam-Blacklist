@@ -29,6 +29,16 @@ type Filter interface{ Test(h uint64) bool }
 
 type Epocher interface{ Epoch() string }
 
+// Pender (tùy chọn, *changefeed.Feed thỏa mãn): true khi feed biết có thay đổi đã commit mà nguồn đọc chưa thấy
+// (replica trễ, F6). Khi đó kết quả "không khớp" có thể sai tạm thời nên không được cache theo epoch hiện tại.
+type Pender interface{ Pending() bool }
+
+// PrimaryFinder (tùy chọn, *store.Store thỏa mãn): tra cứu thẳng trên primary, dùng để xác nhận lại kết quả âm
+// từ replica khi feed đang Pending.
+type PrimaryFinder interface {
+	FindMatchesPrimary(ctx context.Context, keys []normalize.Key) ([]model.Entry, error)
+}
+
 var ErrInvalidInput = normalize.ErrInvalid
 
 type Match struct {
@@ -37,6 +47,7 @@ type Match struct {
 	MatchedValue string `json:"matched_value"`
 	Category     string `json:"category"`
 	RiskScore    int    `json:"risk_score"`
+	Status       string `json:"status,omitempty"` // BLACKLIST hoặc WHITELIST
 }
 
 type Result struct {
@@ -44,6 +55,8 @@ type Result struct {
 	Input       string `json:"input"`
 	Normalized  string `json:"normalized"`
 	Blacklisted bool   `json:"blacklisted"`
+	// Whitelisted: có entry WHITELIST khớp; khi đó Blacklisted luôn false và Match trỏ tới entry WHITELIST.
+	Whitelisted bool   `json:"whitelisted"`
 	Match       *Match `json:"match,omitempty"`
 }
 
@@ -170,12 +183,32 @@ func (c *Checker) CheckRegion(ctx context.Context, typ normalize.Type, raw, regi
 	v, err, _ := c.sf.Do(cacheKey, func() (any, error) {
 		dbctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
-		entries, err := c.finder.FindMatches(dbctx, maybe)
+		// Truy vấn TẤT CẢ ứng viên chứ không chỉ các ứng viên Bloom báo "có thể": entry WHITELIST không nằm trong filter,
+		// nhưng phải thắng luật BLACKLIST domain/prefix mà Bloom đã báo. FindMatches tự kiểm tra khớp chính xác từng khóa.
+		pending := c.pending() // đọc TRƯỚC truy vấn: message tới trong lúc truy vấn cũng được bắt bởi lần đọc sau
+
+		entries, err := c.finder.FindMatches(dbctx, keys)
 		if err != nil {
 			return nil, err
 		}
 
 		m, exp := bestWithExpiry(entries)
+
+		if m == nil && (pending || c.pending()) {
+			// F6: replica có thể chưa có dòng vừa ghi ở pod khác. Hỏi primary (nếu có) để trả lời đúng ngay,
+			// và KHÔNG cache kết quả âm theo epoch cũ (epoch sẽ đổi khi catch-up đọc được thay đổi).
+			if pf, ok := c.finder.(PrimaryFinder); ok {
+				if pe, perr := pf.FindMatchesPrimary(dbctx, keys); perr == nil {
+					m, exp = bestWithExpiry(pe)
+				}
+			}
+
+			if m == nil {
+				metrics.CheckNegativeNotCached.Inc()
+				return m, nil
+			}
+		}
+
 		if b, err := c.sealCache(cached{Match: m, Exp: exp}); err == nil {
 			c.cache.Set(dbctx, cacheKey, b)
 		}
@@ -197,9 +230,18 @@ func (c *Checker) CheckRegion(ctx context.Context, typ normalize.Type, raw, regi
 	return c.finish(res, m), nil
 }
 
+// pending: feed đang biết có thay đổi chưa áp (xem Pender). Epocher không cài Pender thì luôn false.
+func (c *Checker) pending() bool {
+	p, ok := c.epoch.(Pender)
+	return ok && p.Pending()
+}
+
 // finish điền kết quả (blacklisted hoặc safe) và tăng metric tương ứng.
 func (c *Checker) finish(res Result, m *Match) Result {
-	if m != nil {
+	if m != nil && m.Status == model.StatusWhitelist {
+		res.Whitelisted, res.Match = true, m
+		metrics.CheckResult.WithLabelValues("whitelisted").Inc()
+	} else if m != nil {
 		res.Blacklisted, res.Match = true, m
 		metrics.CheckResult.WithLabelValues("blacklisted").Inc()
 	} else {
@@ -209,18 +251,29 @@ func (c *Checker) finish(res Result, m *Match) Result {
 	return res
 }
 
-// best chọn entry có risk cao nhất (hòa thì id nhỏ nhất) và chuyển thành Match.
+// best chọn entry thắng (xem bestWithExpiry) và chuyển thành Match.
 func best(entries []model.Entry) *Match {
 	m, _ := bestWithExpiry(entries)
 	return m
 }
 
 // bestWithExpiry như best, nhưng trả thêm thời điểm hết hạn của entry được chọn.
+//
+// Ưu tiên: WHITELIST thắng mọi BLACKLIST (kể cả luật domain/prefix rộng hơn); trong cùng nhóm status thì
+// risk cao nhất, hòa thì id nhỏ nhất.
 func bestWithExpiry(entries []model.Entry) (*Match, *time.Time) {
 	var top *model.Entry
 
 	for i := range entries {
 		e := &entries[i]
+		if top != nil && (top.Status == model.StatusWhitelist) != (e.Status == model.StatusWhitelist) {
+			if e.Status == model.StatusWhitelist {
+				top = e
+			}
+
+			continue
+		}
+
 		if top == nil || e.RiskScore > top.RiskScore || (e.RiskScore == top.RiskScore && e.ID < top.ID) {
 			top = e
 		}
@@ -231,7 +284,7 @@ func bestWithExpiry(entries []model.Entry) (*Match, *time.Time) {
 	}
 
 	return &Match{EntryID: top.ID, MatchType: top.MatchType, MatchedValue: top.Value,
-		Category: top.Category, RiskScore: top.RiskScore}, top.ExpiresAt
+		Category: top.Category, RiskScore: top.RiskScore, Status: top.Status}, top.ExpiresAt
 }
 
 // CheckBatch kiểm tra nhiều mục song song (tối đa 16 goroutine) và giữ nguyên thứ tự kết quả.

@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"strings"
@@ -20,15 +22,33 @@ import (
 
 	"vsf/internal/apikey"
 	"vsf/internal/auth"
-	"vsf/internal/bloom"
 	"vsf/internal/changefeed"
 	"vsf/internal/checker"
 	"vsf/internal/config"
 	"vsf/internal/inspector"
 	"vsf/internal/model"
+	"vsf/internal/snapshot"
 	"vsf/internal/store"
 	"vsf/web"
 )
+
+// FilterStatus là phần trạng thái của filter mà handler cần (/readyz, dashboard): *filter.Manager.
+type FilterStatus interface {
+	Ready() bool
+	Items() uint64
+}
+
+// SnapshotStatus là phần trạng thái snapshot/leader mà /readyz hiển thị: *snapshot.Syncer. Chỉ để báo cáo, không bao giờ
+// làm instance not-ready (filter đã sẵn sàng thì snapshot cũ hay lỗi dựng không ảnh hưởng việc phục vụ).
+type SnapshotStatus interface {
+	Status() snapshot.Status
+}
+
+// VerifyStatus: *verify.Verifier. Chỉ cảnh báo trên /readyz: pod có âm tính giả vẫn phục vụ (đã tự vá hash thiếu),
+// gạt nó khỏi load balancer không làm filter các pod khác đúng hơn mà còn dồn tải.
+type VerifyStatus interface {
+	Warning(now time.Time) string
+}
 
 type Deps struct {
 	Cfg       config.Config
@@ -36,7 +56,9 @@ type Deps struct {
 	Store     *store.Store
 	Checker   *checker.Checker
 	Feed      *changefeed.Feed
-	Bloom     *bloom.Manager
+	Bloom     FilterStatus
+	Snapshots SnapshotStatus // tùy chọn (nil = không báo)
+	Verify    VerifyStatus   // tùy chọn (nil = không báo): bộ kiểm tra âm tính giả của filter
 	APIKeys   *apikey.Service
 	Inspector *inspector.Inspector
 }
@@ -206,6 +228,17 @@ func (h *Handler) readyz(w http.ResponseWriter, r *http.Request) {
 			h.Feed.TailLen(), st.Truncate(time.Second))
 	}
 
+	// Không có Redis Pub/Sub: instance vẫn đúng (poll change_log nhanh), chỉ tốn tài nguyên hơn -> cảnh báo, không 503.
+	if !h.Feed.Live() {
+		warnings["changefeed_pubsub"] = "not subscribed to redis change notifications; polling change_log every POLL_INTERVAL"
+	}
+
+	if h.Verify != nil {
+		if w := h.Verify.Warning(time.Now()); w != "" {
+			warnings["filter_verify"] = w
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := h.Store.Ping(ctx); err != nil {
@@ -218,23 +251,89 @@ func (h *Handler) readyz(w http.ResponseWriter, r *http.Request) {
 		detail = true
 	}
 
+	var snap map[string]any
+	if h.Snapshots != nil {
+		var snapWarn map[string]string
+
+		snap, snapWarn = snapshotReport(h.Snapshots.Status(), time.Now())
+		maps.Copy(warnings, snapWarn)
+	}
+
 	if len(problems) > 0 {
 		if !detail {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not ready"})
 			return
 		}
 
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not ready", "problems": problems})
+		body := map[string]any{"status": "not ready", "problems": problems}
+		if snap != nil {
+			body["snapshot"] = snap
+		}
+
+		writeJSON(w, http.StatusServiceUnavailable, body)
 
 		return
 	}
 
-	if len(warnings) > 0 && detail {
-		writeJSON(w, 200, map[string]any{"status": "ready", "warnings": warnings})
+	if detail && (len(warnings) > 0 || snap != nil) {
+		body := map[string]any{"status": "ready"}
+		if len(warnings) > 0 {
+			body["warnings"] = warnings
+		}
+
+		if snap != nil {
+			body["snapshot"] = snap
+		}
+
+		writeJSON(w, 200, body)
+
 		return
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "ready"})
+}
+
+// snapshotReport dựng phần chi tiết snapshot cho /readyz (chỉ loopback thấy) và các cảnh báo kèm theo. Chỉ cảnh báo,
+// không bao giờ là problem: pod đã có filter thì vẫn phục vụ đúng dù snapshot cũ hoặc leader đang gặp lỗi dựng.
+func snapshotReport(st snapshot.Status, now time.Time) (map[string]any, map[string]string) {
+	rep := map[string]any{
+		"leader":               st.Leader,
+		"snapshot_id":          st.SnapshotID,
+		"cursor":               fmt.Sprintf("%s.%d", st.CursorXID, st.CursorSeq),
+		"build_failures":       st.BuildFailures,
+		"save_failures":        st.SaveFailures,
+		"install_failures":     st.InstallFailures,
+		"consecutive_failures": st.Consecutive,
+		"pending_save":         st.PendingSave,
+		"fallbacks":            st.Fallbacks,
+		"corrupt_flagged":      st.CorruptMarked,
+		"rebuild_requests":     st.RebuildRequests,
+		"rebuild_served":       st.RebuildServed,
+	}
+
+	warn := map[string]string{}
+
+	if !st.SnapshotAt.IsZero() {
+		age := now.Sub(st.SnapshotAt).Truncate(time.Second)
+		rep["snapshot_age"] = age.String()
+
+		if st.Interval > 0 && age > 3*st.Interval {
+			warn["filter_snapshot_old"] = fmt.Sprintf("serving a filter from a snapshot %s old (build interval %s); "+
+				"new pods may have to wait for a rebuild", age, st.Interval)
+		}
+	}
+
+	if !st.LastSaveOK.IsZero() {
+		rep["last_save_ok"] = st.LastSaveOK.UTC().Format(time.RFC3339)
+	}
+
+	if st.Consecutive > 0 {
+		rep["next_attempt"] = st.NextAttempt.UTC().Format(time.RFC3339)
+		warn["filter_snapshot_failing"] = fmt.Sprintf("%d consecutive snapshot build/save failures; retrying with backoff "+
+			"(next attempt %s)", st.Consecutive, st.NextAttempt.UTC().Format(time.RFC3339))
+	}
+
+	return rep, warn
 }
 
 // stallWarnAfter là thời gian thay đổi được phép chờ sau một transaction mở trước khi /readyz nhắc tới.
@@ -404,6 +503,13 @@ func isHTMX(r *http.Request) bool {
 
 // serverError ghi log lỗi và trả 500 cho client mà không lộ chi tiết.
 func (h *Handler) serverError(w http.ResponseWriter, r *http.Request, err error) {
+	// Client đã bỏ đi (đóng tab, rời trang): không phải lỗi hệ thống, không ghi ERROR. 499 theo quy ước của nginx.
+	if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+		h.Log.Info("request canceled by client", "path", r.URL.Path, "method", r.Method)
+		w.WriteHeader(499)
+		return
+	}
+
 	h.Log.Error("request failed", "path", r.URL.Path, "method", r.Method, "err", err)
 	http.Error(w, "Lỗi hệ thống. Vui lòng thử lại.", http.StatusInternalServerError)
 }

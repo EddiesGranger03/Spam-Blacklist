@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"vsf/internal/bloom"
+	"vsf/internal/filter"
 	"vsf/internal/model"
 )
 
@@ -55,8 +55,8 @@ func (f *fakeSource) ChangesSince(ctx context.Context, xid string, seq int64, li
 	return out, nil
 }
 
-// AllHashes của fakeSource gọi emit với các hash giả.
-func (f *fakeSource) AllHashes(ctx context.Context, emit func(uint64)) error {
+// ScanBlacklistHashes của fakeSource gọi emit với các hash giả.
+func (f *fakeSource) ScanBlacklistHashes(ctx context.Context, emit func(uint64)) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, h := range f.all {
@@ -75,7 +75,7 @@ func quiet() *slog.Logger                                                       
 // TestInitThenSync kiểm tra khởi tạo feed rồi đồng bộ đưa hash vào Bloom.
 func TestInitThenSync(t *testing.T) {
 	src := &fakeSource{all: []int64{10, 20}}
-	b := bloom.NewManager()
+	b := filter.NewManager()
 	f := New(src, b, quiet())
 	ctx := context.Background()
 
@@ -123,7 +123,7 @@ func TestInitThenSync(t *testing.T) {
 
 // TestLagIsHugeBeforeFirstPoll kiểm tra lag rất lớn trước lần poll đầu tiên.
 func TestLagIsHugeBeforeFirstPoll(t *testing.T) {
-	f := New(&fakeSource{}, bloom.NewManager(), quiet())
+	f := New(&fakeSource{}, filter.NewManager(), quiet())
 	if f.Lag() < time.Hour {
 		t.Fatal("lag before first successful poll must be huge so /readyz fails")
 	}
@@ -132,10 +132,10 @@ func TestLagIsHugeBeforeFirstPoll(t *testing.T) {
 // --- C1: phần đuôi "Pending" (đã commit nhưng xid >= xmin vì một transaction cũ còn mở) ---
 
 // newFeed tạo Feed và Bloom manager dùng cho test, nối với nguồn giả.
-func newFeed(t *testing.T, src *fakeSource) (*Feed, *bloom.Manager) {
+func newFeed(t *testing.T, src *fakeSource) (*Feed, *filter.Manager) {
 	t.Helper()
 
-	b := bloom.NewManager()
+	b := filter.NewManager()
 	f := New(src, b, quiet())
 
 	if err := f.Init(context.Background(), 1000); err != nil {

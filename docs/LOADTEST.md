@@ -7,7 +7,7 @@
 > - **Điểm nghẽn đã sửa:** `FindMatches` nhanh hơn 1,7 đến 2,5 lần khi có nhiều request trúng blacklist (mục 5c).
 > - **changefeed:** entry mới thấy được ngay khi có transaction mở (0,01 giây; trước đây không thấy trong 10 giây).
 > - **import:** transaction dài nhất giảm từ 4,98 giây xuống 1,13 giây ở 200.000 dòng.
-> - **Khởi động lạnh ở 9,57 triệu dòng:** tới `/readyz` trong khoảng 32 đến 40 giây, phần lớn là rebuild Bloom (31 giây). RAM server khoảng 60 MB. Sau khởi động, 16 kết nối: 5.966 request/s, p99 10 ms, không lỗi.
+> - **Khởi động lạnh ở 9,57 triệu dòng** (thiết kế cũ, mỗi pod tự dựng Bloom): tới `/readyz` trong khoảng 32 đến 40 giây, phần lớn là rebuild Bloom (31 giây). *Với snapshot: pod mới sẵn sàng sau ~0,17 giây và không đọc dòng nào của `blacklist_entries` (đo ở 9,8 triệu dòng, xem [SCALE_TEST.md](SCALE_TEST.md)).* RAM server khoảng 60 MB. Sau khởi động, 16 kết nối: 5.966 request/s, p99 10 ms, không lỗi.
 > - **Loadtest trong Docker:** app 2 CPU/1 GB, Postgres 4 CPU/2 GB, Redis 1 CPU/256 MB, 1 triệu dòng. Điểm nghẽn là CPU của app (chạm trần 2 nhân), không phải Postgres. RAM app khoảng 60 MB.
 
 > Mọi số liệu lấy từ file kết quả thô của lần chạy (≈ 60 lượt × 20 giây), không làm tròn có lợi.

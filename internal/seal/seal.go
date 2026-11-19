@@ -256,3 +256,18 @@ func (s *Sealer) Hasher() func(typ, matchType, value string) (int64, []byte) {
 		return Hash64(b), b
 	}
 }
+
+// FilterDomain identifies the hash domain of value_hash (which pepper produced it) without revealing the pepper:
+// the first 8 bytes of HMAC(blind key, "vsf-filter-domain-v1"). Every Blind input is length-prefixed, so this message
+// can never equal one. A filter snapshot is only usable by a process whose FilterDomain matches the one it was built
+// under (finding G1). Never 0: 0 marks snapshots written before domains existed.
+func (s *Sealer) FilterDomain() uint64 {
+	m := hmac.New(sha256.New, s.pepper)
+	m.Write([]byte("vsf-filter-domain-v1"))
+
+	if d := binary.BigEndian.Uint64(m.Sum(nil)[:8]); d != 0 {
+		return d
+	}
+
+	return 1
+}

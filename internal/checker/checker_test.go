@@ -308,3 +308,34 @@ func TestCheckRegionIsValidatedForEveryType(t *testing.T) {
 	}
 }
 
+
+// TestWhitelistBeatsBlacklistRules kiểm tra entry WHITELIST thắng BLACKLIST (kể cả risk cao hơn, luật domain/prefix),
+// và kết quả là whitelisted chứ không phải blacklisted.
+func TestWhitelistBeatsBlacklistRules(t *testing.T) {
+	fd := &fakeFinder{entries: []model.Entry{
+		{ID: 1, MatchType: "domain", Value: "evil.com", Category: "scam", RiskScore: 99, Status: model.StatusBlacklist},
+		{ID: 2, MatchType: "exact", Value: "evil.com/ok", Category: "other", RiskScore: 0, Status: model.StatusWhitelist},
+		{ID: 3, MatchType: "prefix", Value: "evil.com/ok", Category: "spam", RiskScore: 80, Status: model.StatusBlacklist},
+	}}
+
+	ck := newChecker(fakeFilter{true}, newMemCache(), fd)
+
+	res, err := ck.Check(context.Background(), normalize.TypeURL, "https://evil.com/ok")
+	if err != nil || res.Blacklisted || !res.Whitelisted || res.Match == nil || res.Match.EntryID != 2 || res.Match.Status != model.StatusWhitelist {
+		t.Fatalf("want whitelisted by entry 2, got %+v err=%v", res, err)
+	}
+
+	// Lần hai đi qua cache vẫn ra kết quả whitelisted.
+	res2, _ := ck.Check(context.Background(), normalize.TypeURL, "https://evil.com/ok")
+	if !res2.Whitelisted || res2.Blacklisted || fd.calls.Load() != 1 {
+		t.Fatalf("cached result = %+v calls=%d", res2, fd.calls.Load())
+	}
+
+	// Không có WHITELIST: hành vi cũ (risk cao nhất thắng).
+	fd2 := &fakeFinder{entries: fd.entries[:1:1]}
+	ck2 := newChecker(fakeFilter{true}, newMemCache(), fd2)
+
+	if r, _ := ck2.Check(context.Background(), normalize.TypeURL, "https://evil.com/ok"); !r.Blacklisted || r.Whitelisted || r.Match.EntryID != 1 {
+		t.Fatalf("blacklist only: %+v", r)
+	}
+}

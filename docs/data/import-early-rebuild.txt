@@ -1,0 +1,10 @@
+=== RUN   TestRiskImportEarlyRebuild
+store: sealed 0 entries in 749ms; audit rows scrubbed=0, hash-chained rows left untouched=0
+store: url path migration: scanned=0 changed=0 merged=0 skipped=0 in 11ms
+    early_rebuild_test.go:54: BASE static=0 delta_cap=1048576  FPR L=0.0000% A=0.0000%
+    early_rebuild_test.go:63: IMPORT 1500000 rows in 47.396s, inserted=1500000
+    early_rebuild_test.go:81: AFTER control A: delta fill 143%, FPR 4.0705% (snapshot #1)
+    early_rebuild_test.go:82: AFTER leader  L: delta fill 67%, FPR 0.4831% (snapshot #1 -> #2, pressure builds 1)
+--- PASS: TestRiskImportEarlyRebuild (49.51s)
+PASS
+ok  	vsf/internal/scaletest	49.674s

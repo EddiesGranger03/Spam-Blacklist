@@ -3,10 +3,9 @@ package store
 import (
 	"context"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 
 	"vsf/internal/model"
 	"vsf/internal/normalize"
@@ -16,7 +15,7 @@ import (
 // entryCols kết thúc bằng key_version: cột này cho biết khóa dữ liệu nào đã mã hóa value_enc, note_enc và source_enc của dòng,
 // và scanEntry cần nó để chọn đúng khóa. Nơi nào chọn thêm cột thì nối chúng vào sau entryCols.
 const entryCols = `id, type, match_type, value_enc, category, risk_score, source_enc, note_enc,
-	expires_at, created_by, created_at, updated_at, key_version`
+	expires_at, created_by, created_at, updated_at, key_version, status`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -31,7 +30,7 @@ func (s *Store) scanEntry(row rowScanner, extra ...any) (model.Entry, error) {
 	)
 
 	dest := append([]any{&e.ID, &e.Type, &e.MatchType, &valueEnc, &e.Category, &score, &srcEnc, &noteEnc,
-		&e.ExpiresAt, &e.CreatedBy, &e.CreatedAt, &e.UpdatedAt, &version}, extra...)
+		&e.ExpiresAt, &e.CreatedBy, &e.CreatedAt, &e.UpdatedAt, &version, &e.Status}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return model.Entry{}, err
 	}
@@ -53,10 +52,13 @@ func (s *Store) scanEntryHash(row rowScanner) (model.Entry, int64, error) {
 	return e, hash, err
 }
 
-// logChange ghi các value_hash đã đổi vào change_log trong transaction đã cho.
-func logChange(ctx context.Context, tx pgx.Tx, hashes ...int64) error {
-	_, err := tx.Exec(ctx, `INSERT INTO change_log(value_hash) SELECT unnest($1::bigint[])`, hashes)
-	return err
+// opForStatus: entry BLACKLIST thì hash cần nằm trong filter (add); entry WHITELIST thì không (remove).
+func opForStatus(status string) int16 {
+	if status == model.StatusWhitelist {
+		return model.OpRemove
+	}
+
+	return model.OpAdd
 }
 
 // CreateEntry tạo một entry blacklist mới (mã hóa dữ liệu, tính chỉ mục) và ghi change_log.
@@ -67,12 +69,23 @@ func (s *Store) CreateEntry(ctx context.Context, key normalize.Key, in model.Ent
 		return model.Entry{}, err
 	}
 
+	status := in.Status
+	if status == "" {
+		status = model.StatusBlacklist
+	}
+
+	if status != model.StatusBlacklist && status != model.StatusWhitelist {
+		return model.Entry{}, fmt.Errorf("%w: status must be BLACKLIST or WHITELIST", normalize.ErrInvalid)
+	}
+
 	tx, err := s.write.Begin(ctx)
 	if err != nil {
 		return model.Entry{}, err
 	}
 
 	defer tx.Rollback(ctx)
+
+	var batch changeBatch
 
 	if s.sealer == nil {
 		return model.Entry{}, errNoSealer
@@ -90,10 +103,10 @@ func (s *Store) CreateEntry(ctx context.Context, key normalize.Key, in model.Ent
 
 	row := tx.QueryRow(ctx, `INSERT INTO blacklist_entries
 		(type, match_type, value_hash, value_blind, value_enc, note_enc, source_enc, key_version,
-		 category, risk_score, expires_at, created_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING `+entryCols,
+		 category, risk_score, expires_at, created_by, status)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING `+entryCols,
 		string(key.Type), string(key.MatchType), key.Hash, key.Blind, valueEnc, noteEnc, sourceEnc,
-		s.sealer.Version(), in.Category, score, in.ExpiresAt, actor.Email)
+		s.sealer.Version(), in.Category, score, in.ExpiresAt, actor.Email, status)
 	e, err := s.scanEntry(row)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -103,7 +116,9 @@ func (s *Store) CreateEntry(ctx context.Context, key normalize.Key, in model.Ent
 		return model.Entry{}, err
 	}
 
-	if err := logChange(ctx, tx, key.Hash); err != nil {
+	// WHITELIST: không thêm vào filter (op remove) nhưng vẫn ghi dòng để epoch đổi, vì một luật BLACKLIST domain/prefix
+	// có thể đã được cache cho chính giá trị này.
+	if err := logChange(ctx, tx, key.Hash, opForStatus(status), &batch); err != nil {
 		return model.Entry{}, err
 	}
 
@@ -111,7 +126,7 @@ func (s *Store) CreateEntry(ctx context.Context, key normalize.Key, in model.Ent
 		return model.Entry{}, err
 	}
 
-	return e, tx.Commit(ctx)
+	return e, s.commitAndNotify(ctx, tx, &batch)
 }
 
 // GetEntry lấy một entry theo ID; trả ErrNotFound nếu không có.
@@ -120,12 +135,29 @@ func (s *Store) GetEntry(ctx context.Context, id int64) (model.Entry, error) {
 	return e, mapNotFound(err)
 }
 
-// UpdateEntry cập nhật một entry, mã hóa lại bằng khóa hiện tại và ghi change_log khi cần.
+// UpdateEntry cập nhật metadata và (tùy chọn) status của một entry, không đổi giá trị.
 func (s *Store) UpdateEntry(ctx context.Context, id int64, in model.EntryInput, actor model.Actor) (model.Entry, error) {
+	return s.UpdateEntryKey(ctx, id, in, nil, actor)
+}
+
+// UpdateEntryKey như UpdateEntry nhưng cho phép đổi cả giá trị: newKey (đã chuẩn hóa bằng normalize.NormalizeEntry,
+// cùng type và match_type với entry hiện tại) thay cho giá trị cũ; nil = giữ nguyên giá trị.
+//
+// value_hash là khóa partition nên đổi giá trị = chuyển dòng sang partition khác: DELETE dòng cũ + INSERT dòng mới
+// với cùng id (và created_at/created_by) trong MỘT transaction, nên không bao giờ thấy dòng biến mất hay nhân đôi.
+// Trùng với entry khác -> ErrDuplicate (handler trả 409), transaction rollback, dòng cũ còn nguyên.
+//
+// change_log: hash cũ ghi op remove + hash mới ghi op add (BLACKLIST) hoặc remove (WHITELIST). Khi giữ nguyên giá trị:
+// một dòng theo status mới (BLACKLIST->add, WHITELIST->remove). Luôn có ít nhất một dòng để epoch đổi.
+func (s *Store) UpdateEntryKey(ctx context.Context, id int64, in model.EntryInput, newKey *normalize.Key, actor model.Actor) (model.Entry, error) {
 	// Store tự kiểm tra risk_score (cột SMALLINT) thay vì tin người gọi đã Validate.
 	score, err := riskScore16(in.RiskScore)
 	if err != nil {
 		return model.Entry{}, err
+	}
+
+	if in.Status != "" && in.Status != model.StatusBlacklist && in.Status != model.StatusWhitelist {
+		return model.Entry{}, fmt.Errorf("%w: status must be BLACKLIST or WHITELIST", normalize.ErrInvalid)
 	}
 
 	tx, err := s.write.Begin(ctx)
@@ -135,10 +167,17 @@ func (s *Store) UpdateEntry(ctx context.Context, id int64, in model.EntryInput, 
 
 	defer tx.Rollback(ctx)
 
+	var batch changeBatch
+
 	before, hash, err := s.scanEntryHash(tx.QueryRow(ctx,
 		`SELECT `+entryCols+`, value_hash FROM blacklist_entries WHERE id=$1 FOR UPDATE`, id))
 	if err != nil {
 		return model.Entry{}, mapNotFound(err)
+	}
+
+	status := in.Status
+	if status == "" {
+		status = before.Status
 	}
 
 	noteEnc, sourceEnc, err := s.sealNoteSource(in.Note, in.Source)
@@ -146,31 +185,78 @@ func (s *Store) UpdateEntry(ctx context.Context, id int64, in model.EntryInput, 
 		return model.Entry{}, err
 	}
 
+	if newKey != nil && (string(newKey.Type) != before.Type || string(newKey.MatchType) != before.MatchType) {
+		return model.Entry{}, fmt.Errorf("%w: type and match_type cannot be changed", normalize.ErrInvalid)
+	}
+
 	// key_version xác định khóa cho CẢ BA bản mã của dòng, nên ghi phiên bản hiện tại mà để value_enc ở khóa cũ
 	// sẽ làm dòng không đọc được khi khóa cũ bị gỡ bỏ (C4). Giá trị đã được giải mã ở trên, nên mã hóa lại bằng khóa hiện tại:
 	// một lần cập nhật cũng chuyển dòng sang khóa mới.
-	valueEnc, err := s.sealer.Seal(before.Value, seal.AADValue)
+	value := before.Value
+	moved := newKey != nil && newKey.Value != before.Value
+
+	if moved {
+		value = newKey.Value
+	}
+
+	valueEnc, err := s.sealer.Seal(value, seal.AADValue)
 	if err != nil {
 		return model.Entry{}, err
 	}
 
-	after, err := s.scanEntry(tx.QueryRow(ctx, `UPDATE blacklist_entries
-		SET category=$3, risk_score=$4, source_enc=$5, note_enc=$6, expires_at=$7, key_version=$8, value_enc=$9, updated_at=now()
-		WHERE value_hash=$2 AND id=$1 RETURNING `+entryCols,
-		id, hash, in.Category, score, sourceEnc, noteEnc, in.ExpiresAt, s.sealer.Version(), valueEnc))
-	if err != nil {
-		return model.Entry{}, mapNotFound(err)
-	}
+	var after model.Entry
 
-	if err := logChange(ctx, tx, hash); err != nil {
-		return model.Entry{}, err
+	if !moved {
+		after, err = s.scanEntry(tx.QueryRow(ctx, `UPDATE blacklist_entries
+			SET category=$3, risk_score=$4, source_enc=$5, note_enc=$6, expires_at=$7, key_version=$8, value_enc=$9,
+			    status=$10, updated_at=now()
+			WHERE value_hash=$2 AND id=$1 RETURNING `+entryCols,
+			id, hash, in.Category, score, sourceEnc, noteEnc, in.ExpiresAt, s.sealer.Version(), valueEnc, status))
+		if err != nil {
+			return model.Entry{}, mapNotFound(err)
+		}
+
+		if err := logChange(ctx, tx, hash, opForStatus(status), &batch); err != nil {
+			return model.Entry{}, err
+		}
+	} else {
+		tag, err := tx.Exec(ctx, `DELETE FROM blacklist_entries WHERE id=$1 AND value_hash=$2`, id, hash)
+		if err != nil {
+			return model.Entry{}, err
+		}
+
+		if tag.RowsAffected() != 1 {
+			return model.Entry{}, ErrNotFound
+		}
+
+		after, err = s.scanEntry(tx.QueryRow(ctx, `INSERT INTO blacklist_entries
+			(id, type, match_type, value_hash, value_blind, value_enc, note_enc, source_enc, key_version,
+			 category, risk_score, expires_at, created_by, created_at, status)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING `+entryCols,
+			id, before.Type, before.MatchType, newKey.Hash, newKey.Blind, valueEnc, noteEnc, sourceEnc, s.sealer.Version(),
+			in.Category, score, in.ExpiresAt, before.CreatedBy, before.CreatedAt, status))
+		if err != nil {
+			if isUniqueViolation(err) {
+				return model.Entry{}, ErrDuplicate
+			}
+
+			return model.Entry{}, err
+		}
+
+		if err := logChange(ctx, tx, hash, model.OpRemove, &batch); err != nil {
+			return model.Entry{}, err
+		}
+
+		if err := logChange(ctx, tx, newKey.Hash, opForStatus(status), &batch); err != nil {
+			return model.Entry{}, err
+		}
 	}
 
 	if err := s.writeAudit(ctx, tx, actor, "entry.update", id, map[string]any{"before": s.auditView(before), "after": s.auditView(after)}); err != nil {
 		return model.Entry{}, err
 	}
 
-	return after, tx.Commit(ctx)
+	return after, s.commitAndNotify(ctx, tx, &batch)
 }
 
 // DeleteEntry xóa một entry và ghi change_log cho hash của nó.
@@ -182,13 +268,15 @@ func (s *Store) DeleteEntry(ctx context.Context, id int64, actor model.Actor) er
 
 	defer tx.Rollback(ctx)
 
+	var batch changeBatch
+
 	e, hash, err := s.scanEntryHash(tx.QueryRow(ctx,
 		`DELETE FROM blacklist_entries WHERE id=$1 RETURNING `+entryCols+`, value_hash`, id))
 	if err != nil {
 		return mapNotFound(err)
 	}
 
-	if err := logChange(ctx, tx, hash); err != nil {
+	if err := logChange(ctx, tx, hash, model.OpRemove, &batch); err != nil {
 		return err
 	}
 
@@ -196,12 +284,13 @@ func (s *Store) DeleteEntry(ctx context.Context, id int64, actor model.Actor) er
 		return err
 	}
 
-	return tx.Commit(ctx)
+	return s.commitAndNotify(ctx, tx, &batch)
 }
 
 type ListFilter struct {
 	Type     string
 	Category string
+	Status   string // "" = mọi status
 	Cursor   int64
 	Limit    int
 	Search   []normalize.Key
@@ -227,6 +316,10 @@ func (s *Store) ListEntries(ctx context.Context, f ListFilter) (entries []model.
 
 	if f.Category != "" {
 		add("category = $%d", f.Category)
+	}
+
+	if f.Status != "" {
+		add("status = $%d", f.Status)
 	}
 
 	op, dir := "<", "DESC"
@@ -290,6 +383,16 @@ func (s *Store) ListEntries(ctx context.Context, f ListFilter) (entries []model.
 
 // FindMatches tìm các entry khớp với danh sách khóa đã băm, bỏ qua entry đã hết hạn; dùng khi Bloom báo có thể có.
 func (s *Store) FindMatches(ctx context.Context, keys []normalize.Key) ([]model.Entry, error) {
+	return s.findMatches(ctx, s.read, keys)
+}
+
+// FindMatchesPrimary như FindMatches nhưng đọc primary: checker dùng khi replica có thể đang trễ sau một thay đổi
+// đã được báo qua Pub/Sub (F6). Không có replica thì tương đương FindMatches.
+func (s *Store) FindMatchesPrimary(ctx context.Context, keys []normalize.Key) ([]model.Entry, error) {
+	return s.findMatches(ctx, s.write, keys)
+}
+
+func (s *Store) findMatches(ctx context.Context, db *pgxpool.Pool, keys []normalize.Key) ([]model.Entry, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
@@ -315,7 +418,7 @@ func (s *Store) FindMatches(ctx context.Context, keys []normalize.Key) ([]model.
 		want[candidate{k.Hash, string(k.Type), string(k.MatchType), string(k.Blind)}] = struct{}{}
 	}
 
-	rows, err := s.read.Query(ctx, `SELECT `+entryCols+`, value_hash, value_blind
+	rows, err := db.Query(ctx, `SELECT `+entryCols+`, value_hash, value_blind
 		FROM blacklist_entries
 		WHERE value_hash = ANY($1::bigint[]) AND value_blind = ANY($4::bytea[])
 		  AND type = ANY($2::text[]) AND match_type = ANY($3::text[])
@@ -350,7 +453,7 @@ func (s *Store) FindMatches(ctx context.Context, keys []normalize.Key) ([]model.
 
 // AllHashes gọi emit với mọi value_hash trong bảng, dùng để dựng lại Bloom filter.
 func (s *Store) AllHashes(ctx context.Context, emit func(uint64)) error {
-	rows, err := s.read.Query(ctx, `SELECT value_hash FROM blacklist_entries`)
+	rows, err := s.read.Query(ctx, `SELECT value_hash FROM blacklist_entries WHERE status = 'BLACKLIST'`)
 	if err != nil {
 		return err
 	}
@@ -362,7 +465,7 @@ func (s *Store) AllHashes(ctx context.Context, emit func(uint64)) error {
 			return err
 		}
 
-		emit(uint64(h))  // #nosec G115 -- chủ ý: cùng bit pattern với hash đã lưu trong BIGINT
+		emit(uint64(h)) // #nosec G115 -- chủ ý: cùng bit pattern với hash đã lưu trong BIGINT
 	}
 
 	return rows.Err()

@@ -41,17 +41,25 @@ flowchart TD
     D --> E["st.SetSealer -> normalize.SetHasher(sl.Hasher)"]
     E --> F["st.SetAuditKey + st.Migrate (Advisory Lock 727274)"]
     F --> G["bootstrapAdmin (neu CountAdmins == 0)"]
-    G --> H["Khoi tao Redis Cache, bloom.Manager, changefeed.Feed, checker.Checker, apikey.Service, inspector"]
+    G --> H["Khoi tao Redis, filter.Manager, changefeed.Feed (+ Publisher), checker, apikey, inspector"]
     H --> I["handler.New -> Router + buildRouteIndex"]
     I --> J["http.Server.ListenAndServe (goroutine)"]
-    I --> K["Background init: feed.Init (goroutine)"]
-    K --> L["supervise: changefeed Loop (Feed.Run)"]
-    K --> M["supervise: backgroundJobs (FlushLastUsed / Purge / Rebuild)"]
+    I --> K["goroutine: snapshot.Syncer.Bootstrap"]
+    K --> K1{"Co snapshot hop le?"}
+    K1 -->|"co"| K2["Tai snapshot + verify checksum + replay change_log sau cursor"]
+    K1 -->|"khong"| K3{"pg_try_advisory_lock(727275)?"}
+    K3 -->|"leader"| K4["Quet blacklist_entries -> binary fuse -> Save snapshot -> Install"]
+    K3 -->|"khong"| K5["Cho snapshot cua leader (/readyz 503)"]
+    K5 --> K1
+    K2 --> L["ready: supervise changefeed.RunSync + Subscribe + syncer.Run + backgroundJobs"]
+    K4 --> L
 ```
 
 **Điểm quan trọng cần nhớ:**
 - Khi [`SetSealer`](../internal/store/sealed.go#L16) được gọi ở bước khởi động, nó đồng thời gọi [`normalize.SetHasher`](../internal/normalize/key.go#L48) để gắn HMAC-SHA256 vào [`MakeKey`](../internal/normalize/key.go#L51). Từ đó mọi hash lookup đều dùng `DATA_PEPPER` qua HMAC-SHA256 thay vì fallback `xxhash`.
 - [`Migrate`](../internal/store/store.go#L103) chạy dưới lock Postgres `pg_advisory_lock(727274)` gồm: SQL migrations -> [`convertToSealed`](../internal/store/sealmigrate.go#L29) -> [`VerifyKeys`](../internal/store/keys.go#L79) -> [`runURLPathMigration`](../internal/store/urlmigrate.go#L50).
+- **Khởi động từ snapshot, không quét bảng.** [`Syncer.Bootstrap`](../internal/snapshot/syncer.go#L200) thử [`LoadNewer`](../internal/snapshot/syncer.go#L85) trước: đọc snapshot mới nhất từ Postgres (`filter_snapshots`/`filter_snapshot_chunks`), [`Decode`](../internal/snapshot/snapshot.go#L129) kiểm CRC-64, so cursor trong file với metadata, rồi [`Feed.Install`](../internal/changefeed/changefeed.go#L214) replay `change_log` sau cursor vào lớp delta/removed **trước khi** swap (không có lúc filter đang phục vụ thiếu thay đổi). Không có snapshot dùng được thì chỉ pod giành được advisory lock (leader) gọi [`BuildAndPublish`](../internal/snapshot/syncer.go#L135); pod khác chờ và lặp lại. Snapshot già hơn 23h (`ErrStale`) bị từ chối vì `change_log` giữ 24h.
+- Sau khi ready, bốn vòng nền chạy qua [`supervise`](../cmd/server/supervise.go#L26): `Feed.RunSync` (catch-up `change_log`), `Feed.Subscribe` (Redis Pub/Sub, chỉ khi có `REDIS_ADDR`), `Syncer.Run` (leader dựng snapshot mỗi `FILTER_SNAPSHOT_INTERVAL`; mọi pod tìm snapshot mới mỗi `FILTER_SNAPSHOT_POLL`) và `backgroundJobs`.
 - Hai vòng lặp nền (`changefeed` và `backgroundJobs`) đều chạy qua [`supervise`](../cmd/server/supervise.go#L26) / [`runGuarded`](../cmd/server/supervise.go#L42): nếu bị panic sẽ recover, tăng metric `BackgroundPanics`, nghỉ `5s` (`loopRestartDelay`) rồi tự khởi động lại.
 - Khi tắt server (`shutCtx` tối đa 15s), server gọi [`FlushLastUsed`](../internal/apikey/apikey.go#L321) rồi `srv.Shutdown`.
 
@@ -102,28 +110,41 @@ sequenceDiagram
 
 ---
 
-### Luồng 3: Ghi/Import Blacklist & Đồng bộ Changefeed -> Bloom -> Cache
+### Luồng 3: Ghi/Import Blacklist & Đồng bộ Changefeed -> Filter 3 lớp -> Cache (Pub/Sub giữa các pod)
 
-Khi Admin thêm/sửa/xóa 1 entry hoặc import cả file CSV lớn:
+Khi Admin thêm/sửa/xóa 1 entry (gồm đổi `status` BLACKLIST/WHITELIST hoặc đổi giá trị) hoặc import cả file CSV lớn:
 
 ```mermaid
 flowchart TD
-    A["Admin POST /admin/entries hoac /admin/import"] --> B["Middleware: requireSession -> csrfProtect -> requireRole(Editor)"]
-    B --> C1["Don le: CreateEntry / UpdateEntry / DeleteEntry"]
-    B --> C2["CSV lon: importStart (max 2GB temp file) -> guardImport -> runImport"]
-    C2 --> C3["store.ImportWith: chia batch (100k rows / 32MB)"]
-    C3 --> C4["importBatch: TEMP TABLE import_stage -> CopyFrom -> UPSERT blacklist_entries"]
-    C1 --> D["Ghi vao blacklist_entries + change_log + audit_logs (HMAC chain) trong tx"]
-    C4 --> D
-    D --> E["afterWrite / ket thuc runImport goi feed.SyncNow"]
-    E --> F["store.ChangesSince: lay thay doi theo (xid, seq) + co pending"]
-    F --> G["Nap tat ca value_hash (ke ca pending) vao bloom.Manager.Add"]
-    G --> H["Cap nhat cursor (chi tien khi !pending) + publishEpoch -> vo hieu hoa cache cu"]
+    A["Admin POST/PUT /admin/entries hoac /admin/import"] --> B["Middleware: requireSession -> csrfProtect -> requireRole(Editor)"]
+    B --> C1["Don le: CreateEntry / UpdateEntry(Key) / DeleteEntry"]
+    B --> C2["CSV lon: importStart -> guardImport -> runImport"]
+    C1 --> D["Tx: ghi blacklist_entries + change_log(value_hash, op) + audit_logs (HMAC chain)"]
+    C2 --> D
+    D --> E["commitAndNotify: COMMIT roi moi publish"]
+    E --> P["Publisher.NotifyChanges: Redis PUBLISH {seq_max, [hash, op]} (timeout 250ms, loi chi log)"]
+    P -. "Redis Pub/Sub" .-> R["Pod khac: Feed.HandleMessage"]
+    R --> R1["op=add: ap NGAY hash vao delta (ms)"]
+    R --> R2["Wake -> RunSync -> SyncNow"]
+    E --> S["Pod ghi: SyncNow (afterWrite / runImport)"]
+    R2 --> F["store.ChangesSince theo (xid, seq) + co pending"]
+    S --> F
+    F --> G["apply: add -> Layered.Add/Readd; remove da chot -> Layered.Remove (tap removed chinh xac)"]
+    G --> H["Cursor chi tien khi !pending + publishEpoch -> vo hieu hoa cache cu"]
+    T["Safety poll 30s / fallback poll 1s khi mat Redis"] --> F
 ```
 
+**Filter 3 lớp** ([`internal/filter`](../internal/filter/layered.go)) thay Bloom đơn:
+1. **static**: [`BinaryFuse8`](../internal/filter/fuse.go#L20) dựng từ mọi hash BLACKLIST tại cursor của snapshot (~1,13 byte/key, FPR đo thật 0,39%, bất biến, không thêm được).
+2. **delta**: [`bloom.Filter`](../internal/bloom/bloom.go#L21) nhỏ cho hash thêm sau cursor (chỉ gây dương tính giả, không âm tính giả).
+3. **removed**: map **chính xác** cho hash bị gỡ sau cursor (WHITELIST, xóa, đổi giá trị). Phải chính xác: Bloom ở đây sẽ che nhầm hash khác chỉ vì trùng bit (âm tính giả).
+
+[`Layered.Test`](../internal/filter/layered.go#L53) kiểm `removed` trước, rồi `static`, rồi `delta`. Thêm lại hash đang bị gỡ ([`Readd`](../internal/filter/layered.go#L75)) xóa nó khỏi `removed`.
+
 **Ghi chú vận hành:**
-- [`ChangesSince`](../internal/store/changes.go#L41) tính cột `pending = xid >= pg_snapshot_xmin(pg_current_snapshot())`. Nhờ đó [`SyncNow`](../internal/changefeed/changefeed.go#L172) nạp ngay các row vừa commit (kể cả khi còn transaction khác mở trước nó) vào Bloom để không bị missed detection, trong khi cursor persistent `(f.xid, f.seq)` vẫn giữ phía sau `xmin` để không bỏ sót transaction chưa commit sau này.
-- Định kỳ theo `BloomRebuildInterval` (mặc định 24h), [`backgroundJobs`](../cmd/server/main.go#L190) gọi [`Feed.Rebuild`](../internal/changefeed/changefeed.go#L148) -> [`Manager.Rebuild`](../internal/bloom/bloom.go#L116) để xây Bloom filter mới (loại bỏ các entry đã xóa/hết hạn) mà không chặn luồng đọc nhờ double-buffering + hàng đợi `pending`.
+- [`ChangesSince`](../internal/store/changes.go#L41) tính cột `pending = xid >= pg_snapshot_xmin(pg_current_snapshot())`. Nhờ đó [`SyncNow`](../internal/changefeed/changefeed.go#L327) áp ngay các dòng **thêm** vừa commit (kể cả khi còn transaction cũ hơn đang mở), còn dòng **gỡ** đang pending thì **hoãn** (một transaction cũ hơn có thể commit một lần thêm đứng trước nó; áp gỡ sớm gây âm tính giả). Cursor persistent `(f.xid, f.seq)` vẫn giữ sau `xmin`.
+- **Pub/Sub chỉ là tín hiệu tăng tốc**: [`apply`](../internal/changefeed/changefeed.go#L236) không bao giờ áp `remove` từ message (message có thể đến lệch thứ tự so với `change_log`); `change_log` mới là nguồn sự thật. Mất message được [`RunSync`](../internal/changefeed/changefeed.go#L360) bù bằng safety poll `SAFETY_POLL_INTERVAL` (30s); mất Redis thì [`Subscribe`](../internal/changefeed/notify.go#L168) đặt `live=false` và `RunSync` chuyển sang poll `POLL_INTERVAL` (1s); khi subscribe lại thì resync ngay.
+- Filter **không còn rebuild định kỳ trên từng pod** (`BLOOM_REBUILD_INTERVAL` đã bỏ). Các entry đã xóa/gỡ được dọn khỏi lớp static khi leader dựng snapshot mới ([`Syncer.BuildAndPublish`](../internal/snapshot/syncer.go#L135)) và các pod nhận nó qua [`LoadNewer`](../internal/snapshot/syncer.go#L85) mà không chặn luồng đọc (swap atomic sau khi replay xong).
 
 ---
 
@@ -247,9 +268,11 @@ flowchart TD
 
 ---
 
-### 4. Nhóm Tăng tốc Tra cứu (`bloom`, `cache`, `changefeed`, `checker`)
+### 4. Nhóm Tăng tốc Tra cứu (`filter`, `snapshot`, `bloom`, `cache`, `changefeed`, `checker`)
 
 #### [`internal/bloom/bloom.go`](../internal/bloom/bloom.go)
+> Gói `bloom` giờ chỉ còn `Filter` được dùng làm lớp **delta** của `internal/filter`. `bloom.Manager` bên dưới thuộc thiết kế cũ (một Bloom + rebuild từng pod), không còn nằm trên đường chạy chính.
+
 - [`New`](../internal/bloom/bloom.go#L21): Cấp phát `Filter` (`bitsPerItem=10`, `numHashes=7`, tối thiểu 1024 items).
 - [`Filter.probe`](../internal/bloom/bloom.go#L31): Double hashing sinh 7 vị trí bit từ 1 hash 64-bit.
 - [`Filter.Add`](../internal/bloom/bloom.go#L37): Bật bit bằng `atomic.OrUint64` (lock-free).
@@ -260,6 +283,26 @@ flowchart TD
 - [`Manager.Test`](../internal/bloom/bloom.go#L89): Kiểm tra nhanh trong `checker.CheckRegion`. Trả `true` an toàn nếu Bloom chưa `Ready` để fallback xuống DB.
 - [`Manager.Add`](../internal/bloom/bloom.go#L99): Thêm hash vào `cur`; nếu đang có `Rebuild` chạy song song thì đẩy thêm vào slice `pending` để không bị mất key mới.
 - [`Manager.Rebuild`](../internal/bloom/bloom.go#L116): Được `changefeed.Rebuild` gọi; xây `fresh` filter ngoài luồng đọc, có `defer` dọn cờ `rebuilding` nếu panic, replay lại `pending`, rồi tráo con trỏ `m.cur`.
+
+#### [`internal/filter/fuse.go`](../internal/filter/fuse.go) & [`layered.go`](../internal/filter/layered.go) (mới)
+- [`BuildBinaryFuse8`](../internal/filter/fuse.go#L126): Dựng binary fuse filter 8-bit từ các key **duy nhất** (O(n) kỳ vọng; ~24 byte/key bộ nhớ tạm, đo thật). [`DedupeSorted`](../internal/filter/fuse.go#L118): sort + loại trùng tại chỗ (O(n log n)).
+- [`BinaryFuse8.Contains`](../internal/filter/fuse.go#L96): 3 lần đọc mảng fingerprint (7 đến 40 ns/op đo thật), [`WriteTo`](../internal/filter/fuse.go#L224)/[`ReadBinaryFuse8`](../internal/filter/fuse.go#L245): (de)serialize có giới hạn kích thước.
+- [`NewLayered`](../internal/filter/layered.go#L37), [`Test`](../internal/filter/layered.go#L53), [`Add`](../internal/filter/layered.go#L68), [`Readd`](../internal/filter/layered.go#L75), [`Remove`](../internal/filter/layered.go#L91): ba lớp static/delta/removed như Luồng 3.
+- [`Manager`](../internal/filter/layered.go#L124): giữ `*Layered` đang phục vụ (atomic pointer) + `Source{SnapshotID, CursorXID, CursorSeq}`; [`Swap`](../internal/filter/layered.go#L157) thay nguyên khối. `Test` trả `true` khi chưa `Ready` để fallback xuống DB.
+
+#### [`internal/snapshot/snapshot.go`](../internal/snapshot/snapshot.go) & [`syncer.go`](../internal/snapshot/syncer.go) (mới)
+- [`Encode`](../internal/snapshot/snapshot.go#L77)/[`Decode`](../internal/snapshot/snapshot.go#L129): file `VSFF` v1 = header (kind, items, cursor `xid.seq`) + payload binary fuse + CRC-64/ECMA cuối file; Decode từ chối checksum sai, header sai, kích thước vượt `MaxFilterBytes`.
+- Interface [`Store`](../internal/snapshot/snapshot.go#L41) (`Save/LatestID/LoadLatest/Prune`), [`Leader`](../internal/snapshot/syncer.go#L16), [`Installer`](../internal/snapshot/syncer.go#L23): để thay Postgres bằng object storage mà không đụng logic.
+- [`Syncer.Bootstrap`](../internal/snapshot/syncer.go#L200), [`LoadNewer`](../internal/snapshot/syncer.go#L85), [`BuildAndPublish`](../internal/snapshot/syncer.go#L135), [`Tick`](../internal/snapshot/syncer.go#L245), [`Run`](../internal/snapshot/syncer.go#L265): xem Luồng 1.
+
+#### [`internal/store/filtersnap.go`](../internal/store/filtersnap.go) (mới)
+- [`ScanBlacklistHashes`](../internal/store/filtersnap.go#L41): quét `value_hash` của dòng `status='BLACKLIST'`, từng partition (32), keyset theo `id`, `FILTER_SCAN_BATCH` dòng/trang, nghỉ `FILTER_SCAN_PAUSE` giữa trang; đọc replica nếu có. Chỉ leader/dev gọi.
+- [`PGSnapshots.Save`](../internal/store/filtersnap.go#L105): một transaction, chia chunk 4 MiB vào `filter_snapshot_chunks`, `complete=true` chỉ ở cuối (kill giữa chừng = rollback sạch). [`LoadLatest`](../internal/store/filtersnap.go#L184) đọc từng chunk theo yêu cầu từ primary; [`Prune`](../internal/store/filtersnap.go#L248) giữ N bản mới nhất.
+- [`AdvisoryLeader.TryAcquire`](../internal/store/filtersnap.go#L279): `pg_try_advisory_lock(727275)` trên một connection riêng, ping để phát hiện mất session; [`Release`](../internal/store/filtersnap.go#L315).
+
+#### [`internal/changefeed/notify.go`](../internal/changefeed/notify.go) & [`store/notify.go`](../internal/store/notify.go) (mới)
+- [`Publisher.NotifyChanges`](../internal/changefeed/notify.go#L81): publish sau commit (`store.commitAndNotify`), timeout 250 ms, lỗi chỉ log + metric `vsf_sync_published_total{result="error"}`.
+- [`Feed.Subscribe`](../internal/changefeed/notify.go#L168)/[`HandleMessage`](../internal/changefeed/notify.go#L130)/[`Wake`](../internal/changefeed/notify.go#L97)/[`Live`](../internal/changefeed/notify.go#L105): nhận message, áp `add` ngay, đánh thức `RunSync` (tín hiệu dồn lại qua kênh cap 1: nhiều message = một `SyncNow`); ping mỗi 5s phát hiện kết nối chết; backoff 1s đến 15s.
 
 #### [`internal/cache/cache.go`](../internal/cache/cache.go)
 - [`Noop.Get`](../internal/cache/cache.go#L20), [`Noop.Set`](../internal/cache/cache.go#L22): Cache rỗng khi không cấu hình Redis.

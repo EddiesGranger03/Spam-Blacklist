@@ -1,15 +1,18 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"vsf/internal/checker"
 	"vsf/internal/model"
 	"vsf/internal/normalize"
 	"vsf/internal/store"
@@ -25,6 +28,7 @@ type entriesData struct {
 	NextURL   string
 	Type      string
 	Category  string
+	Status    string
 	Cursor    int64
 	Estimate  int64
 	BloomN    uint64
@@ -38,6 +42,7 @@ type entryForm struct {
 	Type      string
 	MatchType string
 	Value     string
+	Status    string
 	Category  string
 	RiskScore int
 	Source    string
@@ -52,6 +57,7 @@ func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 	d := entriesData{
 		Type:     q.Get("type"),
 		Category: q.Get("category"),
+		Status:   q.Get("status"),
 		Asc:      q.Get("dir") == "asc",
 	}
 	if d.Type != "phone" && d.Type != "url" {
@@ -60,6 +66,10 @@ func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 
 	if !slices.Contains(model.Categories, d.Category) {
 		d.Category = ""
+	}
+
+	if d.Status != model.StatusBlacklist && d.Status != model.StatusWhitelist {
+		d.Status = ""
 	}
 
 	d.Cursor, _ = strconv.ParseInt(q.Get("after"), 10, 64)
@@ -73,6 +83,10 @@ func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 
 		if d.Category != "" {
 			v.Set("category", d.Category)
+		}
+
+		if d.Status != "" {
+			v.Set("status", d.Status)
 		}
 
 		if after > 0 {
@@ -93,6 +107,7 @@ func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 	f := store.ListFilter{
 		Type:     d.Type,
 		Category: d.Category,
+		Status:   d.Status,
 		Cursor:   d.Cursor,
 		Limit:    50,
 		Asc:      d.Asc,
@@ -124,18 +139,23 @@ func (h *Handler) listEntries(w http.ResponseWriter, r *http.Request) {
 
 // renderForm hiển thị lại form entry kèm lỗi (dùng khi nhập sai).
 func (h *Handler) renderForm(w http.ResponseWriter, r *http.Request, f entryForm) {
+	h.renderFormStatus(w, r, http.StatusOK, f)
+}
+
+// renderFormStatus như renderForm nhưng với mã HTTP tùy chọn (409 khi giá trị trùng entry khác).
+func (h *Handler) renderFormStatus(w http.ResponseWriter, r *http.Request, code int, f entryForm) {
 	if !isHTMX(r) {
 		http.Redirect(w, r, "/admin/entries", http.StatusSeeOther)
 		return
 	}
 
 	pd := h.newPage(r, "Entry", "entries", f)
-	h.render(w, http.StatusOK, "entries", "entry_form", pd)
+	h.render(w, code, "entries", "entry_form", pd)
 }
 
 // newEntryForm hiển thị form thêm entry mới.
 func (h *Handler) newEntryForm(w http.ResponseWriter, r *http.Request) {
-	h.renderForm(w, r, entryForm{Type: "phone", RiskScore: 50, Category: "spam"})
+	h.renderForm(w, r, entryForm{Type: "phone", RiskScore: 50, Category: "spam", Status: model.StatusBlacklist})
 }
 
 // parseEntryForm đọc và kiểm tra dữ liệu form thành entry nhập liệu.
@@ -148,6 +168,7 @@ func parseEntryForm(r *http.Request) (entryForm, model.EntryInput, error) {
 	f := entryForm{
 		Type: r.PostFormValue("type"), MatchType: r.PostFormValue("match_type"),
 		Value: strings.TrimSpace(r.PostFormValue("value")), Category: r.PostFormValue("category"),
+		Status:    strings.ToUpper(strings.TrimSpace(r.PostFormValue("status"))),
 		RiskScore: score, Source: strings.TrimSpace(r.PostFormValue("source")),
 		Note: strings.TrimSpace(r.PostFormValue("note")), ExpiresAt: strings.TrimSpace(r.PostFormValue("expires_at")),
 	}
@@ -161,7 +182,7 @@ func parseEntryForm(r *http.Request) (entryForm, model.EntryInput, error) {
 		return f, model.EntryInput{}, errors.New("ngày hết hạn không hợp lệ (dùng YYYY-MM-DD)")
 	}
 
-	in := model.EntryInput{Category: f.Category, RiskScore: f.RiskScore, Source: f.Source, Note: f.Note, ExpiresAt: exp}
+	in := model.EntryInput{Status: f.Status, Category: f.Category, RiskScore: f.RiskScore, Source: f.Source, Note: f.Note, ExpiresAt: exp}
 	if err := in.Validate(); err != nil {
 		return f, in, err
 	}
@@ -185,9 +206,12 @@ func (h *Handler) createEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.Store.CreateEntry(r.Context(), key, in, h.actorFrom(r)); err != nil {
+	wctx, wcancel := writeCtx(r)
+	defer wcancel()
+
+	if _, err := h.Store.CreateEntry(wctx, key, in, h.actorFrom(r)); err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
-			f.Error = "Giá trị này đã có trong blacklist."
+			f.Error = "Giá trị này đã có trong danh sách."
 			h.renderForm(w, r, f)
 			return
 		}
@@ -224,7 +248,7 @@ func (h *Handler) editEntryForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f := entryForm{ID: e.ID, Type: e.Type, MatchType: e.MatchType, Value: e.Value, Category: e.Category,
+	f := entryForm{ID: e.ID, Type: e.Type, MatchType: e.MatchType, Value: e.Value, Status: e.Status, Category: e.Category,
 		RiskScore: e.RiskScore, Source: e.Source, Note: e.Note}
 
 	if e.ExpiresAt != nil {
@@ -251,9 +275,32 @@ func (h *Handler) updateEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.Store.UpdateEntry(r.Context(), id, in, h.actorFrom(r)); err != nil {
+	// Giá trị có thể được sửa: chuẩn hóa lại với type/match_type của entry hiện tại (form khóa hai trường này).
+	key, err := normalize.NormalizeEntry(normalize.Type(f.Type), normalize.MatchType(f.MatchType), f.Value, h.Cfg.DefaultRegion)
+	if err != nil {
+		f.Error = userMessage(err)
+		h.renderForm(w, r, f)
+		return
+	}
+
+	wctx, wcancel := writeCtx(r)
+	defer wcancel()
+
+	if _, err := h.Store.UpdateEntryKey(wctx, id, in, &key, h.actorFrom(r)); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			http.NotFound(w, r)
+			return
+		}
+
+		if errors.Is(err, store.ErrDuplicate) {
+			f.Error = "Giá trị này đã có trong danh sách (entry khác)."
+			h.renderFormStatus(w, r, http.StatusConflict, f)
+			return
+		}
+
+		if errors.Is(err, normalize.ErrInvalid) {
+			f.Error = userMessage(err)
+			h.renderForm(w, r, f)
 			return
 		}
 
@@ -274,7 +321,10 @@ func (h *Handler) deleteEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Store.DeleteEntry(r.Context(), id, h.actorFrom(r)); err != nil {
+	wctx, wcancel := writeCtx(r)
+	defer wcancel()
+
+	if err := h.Store.DeleteEntry(wctx, id, h.actorFrom(r)); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -290,7 +340,11 @@ func (h *Handler) deleteEntry(w http.ResponseWriter, r *http.Request) {
 
 // afterWrite đồng bộ changefeed ngay sau khi ghi entry để thay đổi có hiệu lực tức thì.
 func (h *Handler) afterWrite(r *http.Request) {
-	if err := h.Feed.SyncNow(r.Context()); err != nil {
+	// Dữ liệu đã commit: đồng bộ filter của pod này cho trọn vẹn kể cả khi client đã rời trang (writeCtx).
+	ctx, cancel := writeCtx(r)
+	defer cancel()
+
+	if err := h.Feed.SyncNow(ctx); err != nil {
 		h.Log.Error("sync after write", "err", err)
 	}
 }
@@ -331,7 +385,7 @@ func (h *Handler) checkSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 
 	default:
-		d.Result = res
+		d.Result = h.annotateWhitelist(r.Context(), normalize.Type(d.Type), d.Value, res)
 	}
 
 	pd := h.newPage(r, "Check thử", "check", d)
@@ -342,4 +396,47 @@ func (h *Handler) checkSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, http.StatusOK, "check", "layout", pd)
+}
+
+// writeCtx trả context cho thao tác GHI của portal: tách khỏi việc client hủy request (rời trang ngay sau khi bấm Lưu)
+// nhưng vẫn có hạn chót. Nếu dùng r.Context(), client hủy giữa chừng có thể làm COMMIT đã chạy trên Postgres mà
+// handler vẫn nhận "context canceled" và trả 500, dù dữ liệu đã lưu.
+func writeCtx(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), writeTimeout)
+}
+
+const writeTimeout = 10 * time.Second
+
+// annotateWhitelist chỉ dùng cho trang "Check thử" của admin. Đường check thật trả "an toàn" ngay khi filter báo không có,
+// mà số WHITELIST thì không nằm trong filter, nên kết quả không cho biết số đó có entry WHITELIST. Trang admin tra thêm DB
+// (chỉ khi kết quả là an toàn) để người vận hành thấy rõ. API công khai không bị ảnh hưởng (không thêm truy vấn DB).
+func (h *Handler) annotateWhitelist(ctx context.Context, typ normalize.Type, raw string, res checker.Result) checker.Result {
+	if res.Blacklisted || res.Whitelisted {
+		return res
+	}
+
+	_, keys, err := normalize.Candidates(typ, raw, h.Cfg.DefaultRegion)
+	if err != nil || len(keys) == 0 {
+		return res
+	}
+
+	entries, err := h.Store.FindMatches(ctx, keys)
+	if err != nil {
+		h.Log.Warn("check page: whitelist lookup failed", "err", err)
+		return res
+	}
+
+	for _, e := range entries {
+		if e.Status != model.StatusWhitelist {
+			continue
+		}
+
+		if res.Match == nil || e.RiskScore > res.Match.RiskScore {
+			res.Whitelisted = true
+			res.Match = &checker.Match{EntryID: e.ID, MatchType: e.MatchType, MatchedValue: e.Value,
+				Category: e.Category, RiskScore: e.RiskScore, Status: e.Status}
+		}
+	}
+
+	return res
 }

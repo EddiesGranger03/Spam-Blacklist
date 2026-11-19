@@ -1,0 +1,29 @@
+== waiting for all nodes to be ready
+  PASS - server-a (http://127.0.0.1:8201) ready after 0s
+  PASS - server-b (http://127.0.0.1:8202) ready after 0s
+  PASS - server-c (http://127.0.0.1:8203) ready after 0s
+== propagation: write on server-a -> read on every other node (real HTTP, real Redis Pub/Sub)
+  PASS - every node converged on every create / status flip / value change (100 rounds x 2 nodes)
+  note - propagation (includes the write's own HTTP time): create n=200 p50=3.6ms p90=4.7ms p99=9.6ms max=10ms
+  note - propagation: BLACKLIST->WHITELIST n=200 p50=3.6ms p90=4.4ms p99=6.9ms max=7.5ms
+  note - propagation: value change n=200 p50=5.2ms p90=6.8ms p99=10.2ms max=14ms
+== rolling restart: restart each node in turn; probes keep hitting the nodes that stay up
+  PASS - server-a ready again 0s after the restart command returned (command took 1.6s)
+  PASS - while server-a restarted: 496 probes on the other nodes, 0 wrong answers, 0 request errors
+  PASS - write made on server-b just after restarting server-a is visible on server-a
+  PASS - server-a still blocks the pre-existing entry after restart
+  PASS - server-b ready again 0s after the restart command returned (command took 1.02s)
+  PASS - while server-b restarted: 306 probes on the other nodes, 0 wrong answers, 0 request errors
+  PASS - write made on server-a just after restarting server-b is visible on server-b
+  PASS - server-b still blocks the pre-existing entry after restart
+  PASS - server-c ready again 0s after the restart command returned (command took 1.07s)
+  PASS - while server-c restarted: 324 probes on the other nodes, 0 wrong answers, 0 request errors
+  PASS - write made on server-a just after restarting server-c is visible on server-c
+  PASS - server-c still blocks the pre-existing entry after restart
+== kill the leader: another node must take over, a new node must start from the existing snapshot
+  FAIL - no node reports vsf_filter_leader 1 (is METRICS_TOKEN set and passed with -metrics-token?)
+
+== summary: 16 PASS, 1 FAIL
+  - propagation (includes the write's own HTTP time): create n=200 p50=3.6ms p90=4.7ms p99=9.6ms max=10ms
+  - propagation: BLACKLIST->WHITELIST n=200 p50=3.6ms p90=4.4ms p99=6.9ms max=7.5ms
+  - propagation: value change n=200 p50=5.2ms p90=6.8ms p99=10.2ms max=14ms

@@ -3,6 +3,8 @@
 > Báo cáo này phản ánh đúng trạng thái code hiện tại. Mỗi mục ghi rõ đã làm, đã kiểm chứng bằng gì, và còn lại gì.
 > Chi tiết theo từng lần thử nằm ở [ATTACK_PUBLIC_API.md](ATTACK_PUBLIC_API.md) (tấn công) và [LOADTEST_CLAUDE.md](LOADTEST_CLAUDE.md) (loadtest).
 
+> **Cập nhật sau báo cáo này (filter 3 lớp, snapshot, Pub/Sub):** các phần dưới đây nói về Bloom đơn rebuild từng pod, khởi động lạnh 31 giây ở 9,57 triệu dòng là số của thiết kế đó. Thiết kế hiện tại (filter binary fuse + delta + removed, snapshot trong Postgres, leader advisory lock, Redis Pub/Sub) và các số đo mới (khởi động từ snapshot 0,17 giây và 0 dòng đọc ở 10 triệu dòng, chaos, độ trễ đồng bộ) nằm ở [SCALE_TEST.md](SCALE_TEST.md) và [RUNBOOK.md](RUNBOOK.md); bốn phát hiện mới (F1 đến F4) cũng ở đó.
+
 ---
 
 ## 0. Tóm tắt

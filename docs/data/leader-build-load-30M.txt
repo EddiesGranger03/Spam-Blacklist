@@ -1,0 +1,8 @@
+# an.sh summaries (Postgres sampler, interval = trigger..built)
+baseline: n=12 span=38s cpu_avg=126.3% cpu_max=328.9% conns_avg=31.8 conns_max=33 active_avg=2.0 active_max=7 blks_read/s=1933 blks_hit/s=8728 tup_returned/s=2453 tup_fetched/s=2416 commits/s=1110.8 mem=2.514GiB/3GiB blockio_end=12.5GB/24.2GB
+build1_loaded: n=32 span=137s cpu_avg=213.1% cpu_max=478.7% conns_avg=33.0 conns_max=33 active_avg=2.4 active_max=9 blks_read/s=4664 blks_hit/s=2505 tup_returned/s=204541 tup_fetched/s=204520 commits/s=465.2 mem=2.572GiB/3GiB blockio_end=18.1GB/24.2GB
+after1: n=6 span=17s cpu_avg=67.9% cpu_max=103.0% conns_avg=33.0 conns_max=33 active_avg=5.5 active_max=24 blks_read/s=870 blks_hit/s=3308 tup_returned/s=569 tup_fetched/s=489 commits/s=423.4 mem=2.484GiB/3GiB blockio_end=18.2GB/24.3GB
+build2_loaded: n=50 span=190s cpu_avg=188.7% cpu_max=563.3% conns_avg=33.0 conns_max=33 active_avg=2.3 active_max=18 blks_read/s=3242 blks_hit/s=1726 tup_returned/s=147807 tup_fetched/s=147785 commits/s=295.3 mem=2.403GiB/3GiB blockio_end=23.1GB/24.4GB
+after2: n=6 span=17s cpu_avg=51.0% cpu_max=73.5% conns_avg=33.0 conns_max=33 active_avg=1.0 active_max=2 blks_read/s=516 blks_hit/s=1365 tup_returned/s=293 tup_fetched/s=291 commits/s=234.5 mem=2.387GiB/3GiB blockio_end=23.2GB/24.5GB
+idle_no_build: n=15 span=41s cpu_avg=3.9% cpu_max=14.2% conns_avg=33.0 conns_max=33 active_avg=0.0 active_max=0 blks_read/s=11 blks_hit/s=426 tup_returned/s=157 tup_fetched/s=124 commits/s=12.2 mem=2.27GiB/3GiB blockio_end=23.2GB/24.5GB
+build3_idle: n=39 span=105s cpu_avg=88.0% cpu_max=140.9% conns_avg=33.0 conns_max=33 active_avg=0.8 active_max=1 blks_read/s=4646 blks_hit/s=313 tup_returned/s=254806 tup_fetched/s=254779 commits/s=26.5 mem=2.447GiB/3GiB blockio_end=26.4GB/24.5GB

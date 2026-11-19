@@ -1,0 +1,18 @@
+node:8211 2026/11/19 11:17:08 nạp 20000 SĐT trúng
+node:8211 2026/11/19 11:17:08 seed=1795061828129280000 dist=uniform
+node:8211 requests=1072771 elapsed=1m15.019s rps=14300 concurrency=32 hit_ratio=0.10 mode=single
+node:8211 latency p50=2.067ms p95=3.9773ms p99=5.5528ms max=57.27ms
+node:8211 status=map[200:1072771] blacklisted_responses=107512
+node:8211 seed=1795061828129280000 dist=uniform
+node:8212 2026/11/19 11:18:23 nạp 20000 SĐT trúng
+node:8212 2026/11/19 11:18:23 seed=1795061903330704700 dist=uniform
+node:8212 requests=981799 elapsed=1m15.019s rps=13087 concurrency=32 hit_ratio=0.10 mode=single
+node:8212 latency p50=2.1346ms p95=4.3174ms p99=6.1285ms max=157.1718ms
+node:8212 status=map[200:981799] blacklisted_responses=98191
+node:8212 seed=1795061903330704700 dist=uniform
+node:8213 2026/11/19 11:19:38 nạp 20000 SĐT trúng
+node:8213 2026/11/19 11:19:38 seed=1795061978508973800 dist=uniform
+node:8213 requests=1006702 elapsed=1m15.018s rps=13420 concurrency=32 hit_ratio=0.10 mode=single
+node:8213 latency p50=2.1312ms p95=4.2423ms p99=5.943ms max=93.7827ms
+node:8213 status=map[200:1006702] blacklisted_responses=100984
+node:8213 seed=1795061978508973800 dist=uniform

@@ -230,9 +230,18 @@ func (s *Store) importBatch(ctx context.Context, rows [][]any, actor model.Actor
 	}
 
 	// Phải nằm trong cùng transaction với upsert: changefeed chỉ biết hash mới từ đây.
-	if _, err := tx.Exec(ctx, `INSERT INTO change_log(value_hash) SELECT DISTINCT value_hash FROM import_stage`); err != nil {
+	// Import có thể ghi hàng triệu dòng: chỉ lấy seq lớn nhất để gửi tín hiệu "đánh thức", không gửi từng hash.
+	var seqMax int64
+	if err := tx.QueryRow(ctx, `WITH ins AS (INSERT INTO change_log(value_hash) SELECT DISTINCT value_hash FROM import_stage RETURNING seq)
+		SELECT coalesce(max(seq), 0) FROM ins`).Scan(&seqMax); err != nil {
 		return res, err
 	}
 
-	return res, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return res, err
+	}
+
+	s.notify(ctx, seqMax, nil)
+
+	return res, nil
 }

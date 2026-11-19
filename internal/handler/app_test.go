@@ -21,7 +21,7 @@ import (
 
 	"vsf/internal/apikey"
 	"vsf/internal/auth"
-	"vsf/internal/bloom"
+	"vsf/internal/filter"
 	"vsf/internal/cache"
 	"vsf/internal/changefeed"
 	"vsf/internal/checker"
@@ -103,7 +103,7 @@ func newAppWith(t *testing.T, handlerDSN string) *testApp {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bm := bloom.NewManager()
+	bm := filter.NewManager()
 	feed := changefeed.New(st, bm, log)
 
 	if err := feed.Init(ctx, 10_000); err != nil {
@@ -510,10 +510,31 @@ func TestAppEntriesLifecycle(t *testing.T) {
 		t.Errorf("edit bad id: %d", r.Code)
 	}
 
-	upd := url.Values{"type": {"phone"}, "match_type": {"exact"}, "value": {"x"}, "category": {"spam"}, "risk_score": {"42"},
-		"source": {"s2"}, "note": {"n2"}}
+	upd := url.Values{"type": {"phone"}, "match_type": {"exact"}, "value": {phone}, "category": {"spam"}, "risk_score": {"42"},
+		"source": {"s2"}, "note": {"n2"}, "status": {"WHITELIST"}}
 	if r := adm.do("PUT", editPath, upd, htmx); r.Code != 204 {
 		t.Errorf("update: %d %s", r.Code, r.Body)
+	}
+
+	// WHITELIST: không còn bị chặn.
+	a.waitBlacklisted("", "phone", phone, false)
+
+	// Đổi status không hợp lệ -> form lỗi (200); đổi value sang giá trị đã có ở entry khác -> 409.
+	bad := url.Values{"type": {"phone"}, "match_type": {"exact"}, "value": {phone}, "category": {"spam"}, "risk_score": {"42"}, "status": {"MAYBE"}}
+	if r := adm.do("PUT", editPath, bad, htmx); r.Code != 200 {
+		t.Errorf("invalid status should re-render the form: %d", r.Code)
+	}
+
+	other := phone9()
+	oth := url.Values{"type": {"phone"}, "match_type": {"exact"}, "value": {other}, "category": {"scam"}, "risk_score": {"10"}}
+
+	if r := create(oth); r.Code != 204 {
+		t.Fatalf("create other: %d %s", r.Code, r.Body)
+	}
+
+	clash := url.Values{"type": {"phone"}, "match_type": {"exact"}, "value": {other}, "category": {"spam"}, "risk_score": {"42"}}
+	if r := adm.do("PUT", editPath, clash, htmx); r.Code != 409 || !strings.Contains(r.Body, "đã có") {
+		t.Errorf("value clash must be 409: %d %s", r.Code, r.Body)
 	}
 
 	if r := adm.do("PUT", editPath, url.Values{"risk_score": {"zzz"}}, htmx); r.Code != 200 {
@@ -575,6 +596,18 @@ func TestAppCheckPage(t *testing.T) {
 
 	if r := adm.do("POST", "/admin/check", url.Values{"type": {"url"}, "value": {"http://evil.example/x"}}, map[string]string{"HX-Request": "true"}); r.Code != 200 {
 		t.Errorf("htmx check: %d", r.Code)
+	}
+
+	// Số WHITELIST không nằm trong filter nên đường check thật trả "an toàn"; trang admin phải ghi rõ là WHITELIST.
+	white := phone9()
+	if _, err := a.st.CreateEntry(context.Background(), mustNormalize(t, "phone", "exact", white),
+		model.EntryInput{Status: model.StatusWhitelist, Category: "other", RiskScore: 10}, model.Actor{Email: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if r := adm.do("POST", "/admin/check", url.Values{"type": {"phone"}, "value": {white}}, htmx); r.Code != 200 ||
+		!strings.Contains(r.Body, "WHITELIST") || strings.Contains(r.Body, "BỊ BLACKLIST") {
+		t.Errorf("check whitelisted: %d %.300s", r.Code, r.Body)
 	}
 }
 

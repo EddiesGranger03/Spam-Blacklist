@@ -1,0 +1,27 @@
+=== RUN   TestScaleBig
+    big_test.go:32: seeding blacklist_entries: have 30000000, want 60000000
+    big_test.go:32:   seeded 32000000 / 60000000 (7s)
+    big_test.go:32:   seeded 34000000 / 60000000 (13s)
+    big_test.go:32:   seeded 36000000 / 60000000 (17s)
+    big_test.go:32:   seeded 38000000 / 60000000 (24s)
+    big_test.go:32:   seeded 40000000 / 60000000 (32s)
+    big_test.go:32:   seeded 42000000 / 60000000 (39s)
+    big_test.go:32:   seeded 44000000 / 60000000 (44s)
+    big_test.go:32:   seeded 46000000 / 60000000 (49s)
+    big_test.go:32:   seeded 48000000 / 60000000 (54s)
+    big_test.go:32:   seeded 50000000 / 60000000 (1m1s)
+    big_test.go:32:   seeded 52000000 / 60000000 (1m10s)
+    big_test.go:32:   seeded 54000000 / 60000000 (1m18s)
+    big_test.go:32:   seeded 56000000 / 60000000 (1m23s)
+    big_test.go:32:   seeded 58000000 / 60000000 (1m31s)
+    big_test.go:32:   seeded 60000000 / 60000000 (1m40s)
+    big_test.go:41: TABLE: 60000000 rows (58800000 BLACKLIST), 0.0 MB on disk (0 B/row incl. indexes); seed/check step took 2m57s (0 if already seeded)
+    big_test.go:62: LEADER BUILD: scan+sort+build 1m18.493s; Go peak above baseline 2406.1 MB (42.9 B/key); filter 63.1 MB (1.13 B/key); items=58800000; blacklist_entries: 6070 queries, 60000016 rows read
+    big_test.go:84: SNAPSHOT SAVE: #2 63.1 MB in 16 chunks, encode+save 1.011s
+    big_test.go:96: FPR: 0.3916% (195817 / 50000000 probes)
+    big_test.go:113: POD FROM SNAPSHOT: ready in 916ms; Go peak above baseline 152.2 MB; resident filter 66.6 MB; items=58800000; blacklist_entries: 0 queries, 0 rows read
+    big_test.go:120: resident Go heap after load (GC'd): 69.4 MB
+    big_test.go:122: from-snapshot: verified 58977 BLACKLIST (0 missing) and 1203 WHITELIST rows (2 false positives)
+--- PASS: TestScaleBig (280.99s)
+PASS
+ok  	vsf/internal/scaletest	281.229s

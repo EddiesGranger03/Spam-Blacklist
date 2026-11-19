@@ -1,0 +1,130 @@
+# Nhiều instance server THẬT (3 process/container) + Postgres primary (+ replica tùy chọn) + Redis, để kiểm chứng đa
+# instance bằng HTTP thật (cmd/multitest). Project riêng "vsfmulti"; cổng chỉ mở trên 127.0.0.1.
+#
+#   docker compose -f deploy/docker-compose.multi.yml up -d --build --wait          # không replica
+#   docker compose -f deploy/docker-compose.multi.yml --profile replica up -d --build --wait \
+#       (kèm READ_DATABASE_URL=postgres://vsf:vsf@postgres-replica:5432/vsf trong môi trường/.env)   # có replica
+#   go run ./cmd/multitest -metrics-token multi-metrics-token-0123
+#   docker compose -f deploy/docker-compose.multi.yml down -v                        # dọn sạch (xóa cả volume)
+# Hoặc dùng scripts/multi-test.sh (dựng, chạy kịch bản, ghi log, dừng).
+#
+# CHẠY TRÊN NHIỀU MÁY: mọi địa chỉ đều qua biến môi trường (xem docs/SCALE_TEST.md mục 5):
+#   DATABASE_URL, READ_DATABASE_URL, REDIS_ADDR, REDIS_PASSWORD trỏ tới Postgres/Redis dùng chung; mỗi máy chỉ chạy
+#   service server-x của mình (`docker compose up -d server-a`), và cmd/multitest nhận -nodes là danh sách URL các máy.
+# Mật khẩu/khóa dưới đây CHỈ cho môi trường thử nghiệm cục bộ.
+name: vsfmulti
+
+x-server: &server
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  image: ${SERVER_IMAGE:-vsf-server:multi}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_started
+  # on-failure: tự khởi động lại nếu server thoát (ví dụ replica chưa sẵn sàng lúc khởi động).
+  restart: on-failure
+  mem_limit: ${SERVER_MEM:-384m}
+  environment: &server-env
+    APP_ENV: development
+    HTTP_ADDR: ":8080"
+    DATABASE_URL: ${DATABASE_URL:-postgres://vsf:vsf@postgres:5432/vsf?sslmode=disable}
+    READ_DATABASE_URL: ${READ_DATABASE_URL:-}
+    REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+    REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    DATA_KEY: ${DATA_KEY:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+    DATA_PEPPER: ${DATA_PEPPER:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
+    SESSION_SECRET: ${SESSION_SECRET:-dev-secret-not-for-production-0123456789}
+    BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@multi.test}
+    BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-ChangeMe-12345}
+    METRICS_TOKEN: ${METRICS_TOKEN:-multi-metrics-token-0123}
+    PG_MAX_CONNS: "16"
+    RATE_LIMIT_RPS: "100000"
+    BLOOM_EXPECTED_ITEMS: ${BLOOM_EXPECTED_ITEMS:-1000000}
+    FILTER_SNAPSHOT_POLL: ${FILTER_SNAPSHOT_POLL:-5s}
+    FILTER_SNAPSHOT_INTERVAL: ${FILTER_SNAPSHOT_INTERVAL:-1h}
+    SAFETY_POLL_INTERVAL: ${SAFETY_POLL_INTERVAL:-30s}
+    POLL_INTERVAL: ${POLL_INTERVAL:-1s}
+
+services:
+  postgres:
+    image: postgres:16
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=5
+      - -c
+      - wal_keep_size=256MB
+      - -c
+      - hot_standby=on
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - max_connections=200
+    environment:
+      POSTGRES_USER: vsf
+      POSTGRES_PASSWORD: vsf
+      POSTGRES_DB: vsf
+    ports:
+      - "127.0.0.1:${MULTI_PG_PORT:-5546}:5432"
+    mem_limit: ${PG_MEM:-1g}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./multi/10-replication.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vsf -d vsf"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Streaming replica (tùy chọn: --profile replica). Dùng bằng cách đặt READ_DATABASE_URL cho các server.
+  postgres-replica:
+    image: postgres:16
+    profiles: ["replica"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: replicator
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -e
+        if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+          gosu postgres pg_basebackup -h postgres -U replicator -D /var/lib/postgresql/data -R -X stream
+        fi
+        exec docker-entrypoint.sh postgres -c hot_standby=on -c max_connections=200
+    ports:
+      - "127.0.0.1:${MULTI_PG_REPLICA_PORT:-5547}:5432"
+    mem_limit: ${PG_MEM:-1g}
+    volumes:
+      - replicadata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${MULTI_REDIS_PORT:-6392}:6379"
+    mem_limit: 128m
+
+  server-a:
+    <<: *server
+    ports: ["127.0.0.1:${MULTI_PORT_A:-8201}:8080"]
+
+  server-b:
+    <<: *server
+    ports: ["127.0.0.1:${MULTI_PORT_B:-8202}:8080"]
+
+  server-c:
+    <<: *server
+    ports: ["127.0.0.1:${MULTI_PORT_C:-8203}:8080"]
+
+volumes:
+  pgdata:
+  replicadata:

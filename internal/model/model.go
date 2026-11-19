@@ -10,11 +10,24 @@ import (
 
 var Categories = []string{"spam", "scam", "phishing", "malware", "telemarketing", "other"}
 
+// Entry status. A WHITELIST entry is an explicit exception that wins over BLACKLIST rules.
+const (
+	StatusBlacklist = "BLACKLIST"
+	StatusWhitelist = "WHITELIST"
+)
+
+// ChangeOp: what the filter must do with a change_log hash.
+const (
+	OpAdd    int16 = 1 // hash may now be present: add it to the filter
+	OpRemove int16 = 2 // hash no longer belongs to a BLACKLIST entry: remove it from the filter
+)
+
 type Entry struct {
 	ID        int64      `json:"id"`
 	Type      string     `json:"type"`
 	MatchType string     `json:"match_type"`
 	Value     string     `json:"value"`
+	Status    string     `json:"status"`
 	Category  string     `json:"category"`
 	RiskScore int        `json:"risk_score"`
 	Source    string     `json:"source"`
@@ -26,6 +39,8 @@ type Entry struct {
 }
 
 type EntryInput struct {
+	// Status: "" means BLACKLIST on create and "keep the current status" on update.
+	Status    string
 	Category  string
 	RiskScore int
 	Source    string
@@ -35,6 +50,10 @@ type EntryInput struct {
 
 // Validate kiểm tra dữ liệu nhập của một entry (loại, kiểu khớp, rủi ro, danh mục, ...).
 func (in *EntryInput) Validate() error {
+	if in.Status != "" && in.Status != StatusBlacklist && in.Status != StatusWhitelist {
+		return fmt.Errorf("%w: status must be BLACKLIST or WHITELIST", normalize.ErrInvalid)
+	}
+
 	if in.Category == "" {
 		in.Category = "spam"
 	}
@@ -147,6 +166,8 @@ type Change struct {
 	Seq  int64
 	XID  string
 	Hash int64
+	// Op: OpAdd (1) adds the hash, OpRemove (2) removes it (change_log.op). 0 = legacy row without op, treated as add.
+	Op int16
 
 	// Pending: dòng đã commit và nhìn thấy được, nhưng xid của nó chưa nhỏ hơn xmin của database
 	// (có transaction cũ hơn vẫn đang mở), nên changefeed không được đẩy con trỏ qua nó:

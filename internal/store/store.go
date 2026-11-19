@@ -29,6 +29,8 @@ type Store struct {
 	auditKey []byte
 	sealer   *seal.Sealer
 	keyCheck KeyCheck
+
+	notifier ChangeNotifier // tín hiệu sau commit (Redis Pub/Sub); nil = không publish
 }
 
 // New mở kết nối tới primary (và replica nếu có), trả về Store đã sẵn sàng.

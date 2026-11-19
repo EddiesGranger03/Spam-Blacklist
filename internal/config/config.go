@@ -67,8 +67,29 @@ type Config struct {
 	DefaultRegion string
 
 	BloomExpectedItems   uint64
-	BloomRebuildInterval time.Duration
-	PollInterval         time.Duration
+	BloomRebuildInterval time.Duration // Deprecated: không còn dùng; filter làm mới qua snapshot (FILTER_SNAPSHOT_INTERVAL)
+	// PollInterval (POLL_INTERVAL, mặc định 1s): chu kỳ poll change_log khi KHÔNG có Redis Pub/Sub (không cấu hình
+	// hoặc mất kết nối). Khi đang subscribe Redis, feed được đánh thức bởi message và chỉ poll an toàn mỗi
+	// SafetyPollInterval (SAFETY_POLL_INTERVAL, mặc định 30s) để phòng message bị mất.
+	PollInterval       time.Duration
+	SafetyPollInterval time.Duration
+	SyncChannel        string // SYNC_CHANNEL, mặc định "vsf:changes"
+
+	// Filter snapshot (package snapshot): leader dựng định kỳ, các pod nạp snapshot thay vì quét bảng.
+	FilterSnapshotInterval time.Duration // FILTER_SNAPSHOT_INTERVAL, mặc định 1h
+	FilterSnapshotPoll     time.Duration // FILTER_SNAPSHOT_POLL, mặc định 30s: chu kỳ tìm snapshot mới / bầu leader
+	FilterSnapshotKeep     int           // FILTER_SNAPSHOT_KEEP, mặc định 3
+	FilterBootstrapTimeout time.Duration // FILTER_BOOTSTRAP_TIMEOUT, mặc định 10m: pod chờ leader quá lâu thì log lỗi
+	FilterScanBatch        int           // FILTER_SCAN_BATCH, mặc định 10000 dòng/trang khi quét
+	FilterScanPause        time.Duration // FILTER_SCAN_PAUSE, mặc định 2ms nghỉ giữa các trang
+	FilterRetryBase        time.Duration // FILTER_RETRY_BASE, mặc định 5s: chờ sau lần dựng/lưu snapshot lỗi đầu tiên (gấp đôi mỗi lần)
+	FilterRetryMax         time.Duration // FILTER_RETRY_MAX, mặc định 10m: trần của thời gian chờ đó
+	FilterVerifyInterval   time.Duration // FILTER_VERIFY_INTERVAL, mặc định 1m: chu kỳ kiểm tra âm tính giả (0 = tắt)
+	FilterVerifySample     int           // FILTER_VERIFY_SAMPLE, mặc định 1000 hash mỗi chu kỳ
+	// F10: leader dựng snapshot sớm khi lớp delta/removed phình (vd import lớn giữa hai lần snapshot).
+	FilterDeltaRebuildRatio float64       // FILTER_DELTA_REBUILD_RATIO, mặc định 0.7 (số phần tử delta / sức chứa thiết kế; <0 = tắt)
+	FilterRemovedRebuildMax int64         // FILTER_REMOVED_REBUILD_MAX, mặc định 1000000 hash trong removed-set (<0 = tắt)
+	FilterMinRebuildGap     time.Duration // FILTER_MIN_REBUILD_GAP, mặc định 5m: khoảng cách tối thiểu giữa hai lần dựng sớm
 
 	RateLimitRPS int
 }
@@ -97,7 +118,24 @@ func Load() (Config, error) {
 		BloomExpectedItems:   uint64(bloomItems), // #nosec G115 -- bloomItems đã được kiểm tra 1..MaxInt32 ở trên
 		BloomRebuildInterval: getenvDuration("BLOOM_REBUILD_INTERVAL", 24*time.Hour),
 		PollInterval:         getenvDuration("POLL_INTERVAL", time.Second),
-		RateLimitRPS:         getenvInt("RATE_LIMIT_RPS", 100),
+		SafetyPollInterval:   getenvDuration("SAFETY_POLL_INTERVAL", 30*time.Second),
+		SyncChannel:          getenv("SYNC_CHANNEL", "vsf:changes"),
+
+		FilterSnapshotInterval:  getenvDuration("FILTER_SNAPSHOT_INTERVAL", time.Hour),
+		FilterSnapshotPoll:      getenvDuration("FILTER_SNAPSHOT_POLL", 30*time.Second),
+		FilterSnapshotKeep:      getenvInt("FILTER_SNAPSHOT_KEEP", 3),
+		FilterBootstrapTimeout:  getenvDuration("FILTER_BOOTSTRAP_TIMEOUT", 10*time.Minute),
+		FilterScanBatch:         getenvInt("FILTER_SCAN_BATCH", 10000),
+		FilterScanPause:         getenvDuration("FILTER_SCAN_PAUSE", 2*time.Millisecond),
+		FilterRetryBase:         getenvDuration("FILTER_RETRY_BASE", 5*time.Second),
+		FilterRetryMax:          getenvDuration("FILTER_RETRY_MAX", 10*time.Minute),
+		FilterVerifyInterval:    getenvDuration("FILTER_VERIFY_INTERVAL", time.Minute),
+		FilterVerifySample:      getenvInt("FILTER_VERIFY_SAMPLE", 1000),
+		FilterDeltaRebuildRatio: getenvFloat("FILTER_DELTA_REBUILD_RATIO", 0.7),
+		FilterRemovedRebuildMax: int64(getenvInt("FILTER_REMOVED_REBUILD_MAX", 1_000_000)),
+		FilterMinRebuildGap:     getenvDuration("FILTER_MIN_REBUILD_GAP", 5*time.Minute),
+
+		RateLimitRPS: getenvInt("RATE_LIMIT_RPS", 100),
 	}
 	c.RedisPassword = getenv("REDIS_PASSWORD", "")
 	c.MetricsToken = getenv("METRICS_TOKEN", "")
@@ -191,11 +229,11 @@ func retiredDataKeys(environ []string) (map[int16]string, error) {
 			continue // Biến rỗng tương đương với chưa thiết lập
 		}
 
-		if _, dup := out[int16(n)]; dup {  // #nosec G109 G115 -- n đã được kiểm tra 1..MaxInt16 ở đoạn trên
+		if _, dup := out[int16(n)]; dup { // #nosec G109 G115 -- n đã được kiểm tra 1..MaxInt16 ở đoạn trên
 			return nil, fmt.Errorf("%s bị khai báo hai lần", name)
 		}
 
-		out[int16(n)] = value  // #nosec G109 G115 -- n đã được kiểm tra 1..MaxInt16 ở đoạn trên
+		out[int16(n)] = value // #nosec G109 G115 -- n đã được kiểm tra 1..MaxInt16 ở đoạn trên
 	}
 
 	return out, nil
@@ -327,6 +365,17 @@ func getenvInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+
+	return def
+}
+
+// getenvFloat: Lấy giá trị biến môi trường kiểu số thực, trả về giá trị mặc định nếu không hợp lệ.
+func getenvFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 

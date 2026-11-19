@@ -28,3 +28,6 @@ Thumbs.db
 tmp/
 *.log
 
+
+# binary tạm của scripts/multi-test.sh
+.multi-bin/

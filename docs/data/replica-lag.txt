@@ -1,0 +1,90 @@
+=== recovery_min_apply_delay=0s (readers: A itself, B, C; all read through the replica) ===
+  setting: 0
+fresh: rounds=15 readers=3 probe-interval=10ms
+  add (BLACKLIST create -> reader says blacklisted, incl. write HTTP): n=45 p50=6.2ms p90=14.8ms p99=18.5ms max=18.5ms
+  flip (BLACKLIST->WHITELIST -> reader says safe):                    n=45 p50=613.7ms p90=639.1ms p99=641.3ms max=641.3ms
+  FALSE NEGATIVE probes (said safe for an entry already written): first-probe-wrong=0 of 45 reads, wrong-probes=0 of 45, never-converged=0
+  http://127.0.0.1:8211 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8211 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8211 vsf_sync_catchup_total{result="caught_up"} 15
+  http://127.0.0.1:8211 vsf_sync_replica_behind_total 15
+  http://127.0.0.1:8212 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8212 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8212 vsf_sync_catchup_total{result="caught_up"} 15
+  http://127.0.0.1:8212 vsf_sync_replica_behind_total 15
+  http://127.0.0.1:8213 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8213 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8213 vsf_sync_catchup_total{result="caught_up"} 15
+  http://127.0.0.1:8213 vsf_sync_replica_behind_total 15
+=== recovery_min_apply_delay=500ms (readers: A itself, B, C; all read through the replica) ===
+  setting: 500ms
+fresh: rounds=15 readers=3 probe-interval=10ms
+  add (BLACKLIST create -> reader says blacklisted, incl. write HTTP): n=45 p50=5.7ms p90=17.7ms p99=35ms max=35ms
+  flip (BLACKLIST->WHITELIST -> reader says safe):                    n=45 p50=633.2ms p90=637.3ms p99=664ms max=664ms
+  FALSE NEGATIVE probes (said safe for an entry already written): first-probe-wrong=0 of 45 reads, wrong-probes=0 of 45, never-converged=0
+  http://127.0.0.1:8211 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8211 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8211 vsf_sync_catchup_total{result="caught_up"} 30
+  http://127.0.0.1:8211 vsf_sync_replica_behind_total 30
+  http://127.0.0.1:8212 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8212 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8212 vsf_sync_catchup_total{result="caught_up"} 30
+  http://127.0.0.1:8212 vsf_sync_replica_behind_total 30
+  http://127.0.0.1:8213 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8213 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8213 vsf_sync_catchup_total{result="caught_up"} 30
+  http://127.0.0.1:8213 vsf_sync_replica_behind_total 30
+=== recovery_min_apply_delay=1s (readers: A itself, B, C; all read through the replica) ===
+  setting: 1s
+fresh: rounds=15 readers=3 probe-interval=10ms
+  add (BLACKLIST create -> reader says blacklisted, incl. write HTTP): n=45 p50=5.1ms p90=6.5ms p99=8ms max=8ms
+  flip (BLACKLIST->WHITELIST -> reader says safe):                    n=45 p50=1.2741s p90=1.2792s p99=1.2806s max=1.2806s
+  FALSE NEGATIVE probes (said safe for an entry already written): first-probe-wrong=0 of 45 reads, wrong-probes=0 of 45, never-converged=0
+  http://127.0.0.1:8211 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8211 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8211 vsf_sync_catchup_total{result="caught_up"} 45
+  http://127.0.0.1:8211 vsf_sync_replica_behind_total 45
+  http://127.0.0.1:8212 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8212 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8212 vsf_sync_catchup_total{result="caught_up"} 45
+  http://127.0.0.1:8212 vsf_sync_replica_behind_total 45
+  http://127.0.0.1:8213 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8213 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8213 vsf_sync_catchup_total{result="caught_up"} 45
+  http://127.0.0.1:8213 vsf_sync_replica_behind_total 45
+=== recovery_min_apply_delay=2s (readers: A itself, B, C; all read through the replica) ===
+  setting: 2s
+fresh: rounds=15 readers=3 probe-interval=10ms
+  add (BLACKLIST create -> reader says blacklisted, incl. write HTTP): n=45 p50=5.4ms p90=6.6ms p99=7.8ms max=7.8ms
+  flip (BLACKLIST->WHITELIST -> reader says safe):                    n=45 p50=2.2759s p90=2.2801s p99=2.2822s max=2.2822s
+  FALSE NEGATIVE probes (said safe for an entry already written): first-probe-wrong=0 of 45 reads, wrong-probes=0 of 45, never-converged=0
+  http://127.0.0.1:8211 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8211 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8211 vsf_sync_catchup_total{result="caught_up"} 60
+  http://127.0.0.1:8211 vsf_sync_replica_behind_total 60
+  http://127.0.0.1:8212 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8212 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8212 vsf_sync_catchup_total{result="caught_up"} 60
+  http://127.0.0.1:8212 vsf_sync_replica_behind_total 60
+  http://127.0.0.1:8213 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8213 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8213 vsf_sync_catchup_total{result="caught_up"} 60
+  http://127.0.0.1:8213 vsf_sync_replica_behind_total 60
+=== recovery_min_apply_delay=5s (readers: A itself, B, C; all read through the replica) ===
+  setting: 5s
+fresh: rounds=15 readers=3 probe-interval=10ms
+  add (BLACKLIST create -> reader says blacklisted, incl. write HTTP): n=45 p50=5.5ms p90=6.9ms p99=7.7ms max=7.7ms
+  flip (BLACKLIST->WHITELIST -> reader says safe):                    n=45 p50=5.2788s p90=5.2826s p99=5.2843s max=5.2843s
+  FALSE NEGATIVE probes (said safe for an entry already written): first-probe-wrong=0 of 45 reads, wrong-probes=0 of 45, never-converged=0
+  http://127.0.0.1:8211 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8211 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8211 vsf_sync_catchup_total{result="caught_up"} 75
+  http://127.0.0.1:8211 vsf_sync_replica_behind_total 75
+  http://127.0.0.1:8212 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8212 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8212 vsf_sync_catchup_total{result="caught_up"} 75
+  http://127.0.0.1:8212 vsf_sync_replica_behind_total 75
+  http://127.0.0.1:8213 vsf_bloom_false_negative_total 0
+  http://127.0.0.1:8213 vsf_check_negative_uncached_total 0
+  http://127.0.0.1:8213 vsf_sync_catchup_total{result="caught_up"} 75
+  http://127.0.0.1:8213 vsf_sync_replica_behind_total 75

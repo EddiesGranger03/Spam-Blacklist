@@ -39,7 +39,7 @@ func (s *Store) Head(ctx context.Context) (xid string, seq int64, err error) {
 // Cột Pending được tính trong cùng câu lệnh (một snapshot) với các dòng, nên nhất quán trong một lần gọi.
 // Vì thứ tự xid là đơn điệu, mọi dòng không Pending luôn đứng trước mọi dòng Pending trong kết quả.
 func (s *Store) ChangesSince(ctx context.Context, afterXID string, afterSeq int64, limit int) ([]model.Change, error) {
-	rows, err := s.read.Query(ctx, `SELECT seq, xid::text, value_hash,
+	rows, err := s.read.Query(ctx, `SELECT seq, xid::text, value_hash, op,
 			xid >= pg_snapshot_xmin(pg_current_snapshot()) AS pending
 		FROM change_log
 		WHERE (xid, seq) > ($1::text::xid8, $2::bigint)
@@ -53,7 +53,7 @@ func (s *Store) ChangesSince(ctx context.Context, afterXID string, afterSeq int6
 
 	for rows.Next() {
 		var c model.Change
-		if err := rows.Scan(&c.Seq, &c.XID, &c.Hash, &c.Pending); err != nil {
+		if err := rows.Scan(&c.Seq, &c.XID, &c.Hash, &c.Op, &c.Pending); err != nil {
 			return nil, err
 		}
 

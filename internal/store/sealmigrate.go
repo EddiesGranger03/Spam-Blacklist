@@ -113,7 +113,8 @@ func createSealedTable(ctx context.Context, tx pgx.Tx) error {
 			expires_at  TIMESTAMPTZ,
 			created_by  TEXT        NOT NULL DEFAULT '',
 			created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-			updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+			updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+			status      TEXT        NOT NULL DEFAULT 'BLACKLIST' CHECK (status IN ('BLACKLIST', 'WHITELIST'))
 		) PARTITION BY HASH (value_hash);
 		DO $$
 		BEGIN

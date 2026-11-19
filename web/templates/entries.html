@@ -1,7 +1,7 @@
 {{define "content"}}
 <h1>Blacklist</h1>
 <p class="muted">
-  ≈ {{.Data.Estimate}} bản ghi (ước lượng từ thống kê Postgres) · Bloom filter: {{.Data.BloomN}} phần tử ·
+  ≈ {{.Data.Estimate}} bản ghi (ước lượng từ thống kê Postgres) · Filter: {{.Data.BloomN}} số BLACKLIST ·
   {{if .Data.Ready}}đã sẵn sàng{{else}}<strong>đang dựng…</strong>{{end}}
 </p>
 
@@ -12,6 +12,11 @@
     <option value="">Mọi loại</option>
     <option value="phone" {{if eq .Data.Type "phone"}}selected{{end}}>Số điện thoại</option>
     <option value="url" {{if eq .Data.Type "url"}}selected{{end}}>URL</option>
+  </select>
+  <select name="status" class="flt">
+    <option value="">Mọi status</option>
+    <option value="BLACKLIST" {{if eq .Data.Status "BLACKLIST"}}selected{{end}}>BLACKLIST</option>
+    <option value="WHITELIST" {{if eq .Data.Status "WHITELIST"}}selected{{end}}>WHITELIST</option>
   </select>
   <select name="category" class="flt">
     <option value="">Mọi category</option>

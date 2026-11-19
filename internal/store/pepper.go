@@ -17,7 +17,13 @@ import (
 // tìm thấy dòng được lưu dưới pepper kia (một số đang bị chặn sẽ bị báo là an toàn).
 //
 // Vì vậy RotatePepper là thao tác OFFLINE: mọi instance phải dừng khi nó chạy, rồi khởi động lại với
-// DATA_PEPPER mới (việc này cũng dựng lại Bloom filter). Trong khoảng đó được phép ngắt và chạy lại:
+// DATA_PEPPER mới.
+//
+// Filter trong RAM KHÔNG tự dựng lại khi khởi động: pod nạp snapshot lưu trong filter_snapshots (G1). Snapshot dựng
+// dưới pepper cũ vẫn đúng checksum nhưng chứa hash cũ, nạp vào thì mọi số BLACKLIST bị báo an toàn. Hai lớp chặn:
+// (1) mỗi snapshot mang "hash domain" (seal.Sealer.FilterDomain, suy ra từ pepper, không lộ pepper) và Syncer chỉ
+// cài snapshot cùng domain với pepper đang chạy; (2) lần chạy thật ở đây XÓA mọi snapshot khác domain của pepper mới
+// ngay từ đầu, nên lần khởi động kế tiếp không có snapshot dùng được và leader quét bảng dựng bản mới. Trong khoảng đó được phép ngắt và chạy lại:
 // một dòng chỉ được ghi lại nếu chỉ mục blind là của pepper CŨ, và bị bỏ qua khi đã là của pepper MỚI. Một
 // dòng không khớp cả hai sẽ dừng việc chạy (sai pepper cũ, hoặc dữ liệu hỏng) trước khi chạm tới thứ gì khác.
 
@@ -33,11 +39,12 @@ type PepperRotateOptions struct {
 
 // PepperRotateResult totals what RotatePepper has done so far.
 type PepperRotateResult struct {
-	Scanned    int64
-	Rewritten  int64 // rows moved to the new pepper (in a dry run: rows that would be)
-	AlreadyNew int64 // rows already under the new pepper (a re-run after an interruption)
-	Skipped    int64 // rows an edit changed between the read and the write
-	Batches    int
+	Scanned          int64
+	Rewritten        int64 // rows moved to the new pepper (in a dry run: rows that would be)
+	AlreadyNew       int64 // rows already under the new pepper (a re-run after an interruption)
+	Skipped          int64 // rows an edit changed between the read and the write
+	SnapshotsDropped int64 // filter snapshots of the old hash domain deleted (G1)
+	Batches          int
 }
 
 // RotatePepper chuyển mọi dòng từ pepper cũ sang pepper hiện tại của store. Xem các quy tắc vận hành ở phần comment phía trên.
@@ -61,12 +68,22 @@ func (s *Store) RotatePepper(ctx context.Context, actor model.Actor, opts Pepper
 			return res, fmt.Errorf("audit start: %w", err)
 		}
 
+		// G1: snapshots of any other domain hold value_hash under the old pepper. Delete them before touching a row, so
+		// that even an interrupted run never leaves a snapshot a restarted pod could install (the Syncer's domain
+		// check would refuse it too; this also frees the space). Chunks go with them (ON DELETE CASCADE).
+		tag, derr := s.write.Exec(ctx, `DELETE FROM filter_snapshots WHERE domain_id <> $1`, s.Snapshots().domainArg())
+		if derr != nil {
+			return res, fmt.Errorf("drop old filter snapshots: %w", derr)
+		}
+
+		res.SnapshotsDropped = tag.RowsAffected()
+
 		defer func() {
 			actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 
 			detail := map[string]any{"status": "done", "scanned": res.Scanned, "rewritten": res.Rewritten,
-				"already_new": res.AlreadyNew, "skipped": res.Skipped, "batches": res.Batches, "at": time.Now().UTC()}
+				"already_new": res.AlreadyNew, "skipped": res.Skipped, "snapshots_dropped": res.SnapshotsDropped, "batches": res.Batches, "at": time.Now().UTC()}
 			if err != nil {
 				detail["status"], detail["error"] = "failed", truncate(err.Error(), 200)
 			}

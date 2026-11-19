@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"vsf/internal/apikey"
-	"vsf/internal/bloom"
+	"vsf/internal/filter"
 	"vsf/internal/changefeed"
 	"vsf/internal/config"
 	"vsf/internal/model"
@@ -200,6 +200,46 @@ func TestBootstrapAdmin(t *testing.T) {
 	}
 }
 
+// F7: nhiều pod khởi động cùng lúc trên DB rỗng đều gọi bootstrapAdmin; tất cả phải thành công và chỉ có đúng một admin.
+func TestBootstrapAdminIsSafeWhenManyPodsStartTogether(t *testing.T) {
+	st, _ := testStore(t)
+	ctx := context.Background()
+	cfg := config.Config{BootstrapEmail: "first@example.com", BootstrapPass: "ChangeMe-12345"}
+
+	const pods = 8
+
+	var wg sync.WaitGroup
+
+	errs := make([]error, pods)
+
+	start := make(chan struct{})
+
+	for i := range pods {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			<-start
+
+			errs[i] = bootstrapAdmin(ctx, st, cfg, quietLog())
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("pod %d: bootstrap must be idempotent, got %v", i, err)
+		}
+	}
+
+	if n, _ := st.CountAdmins(ctx); n != 1 {
+		t.Fatalf("want exactly one admin, got %d", n)
+	}
+}
+
 // Các vòng nền chạy theo chu kỳ, dừng khi context bị hủy, và một lỗi ở một vòng không làm vòng khác dừng.
 func TestBackgroundJobsRunAndStop(t *testing.T) {
 	st, _ := testStore(t)
@@ -210,7 +250,7 @@ func TestBackgroundJobsRunAndStop(t *testing.T) {
 	t.Cleanup(func() { flushEvery, purgeEvery = oldFlush, oldPurge })
 
 	log := quietLog()
-	bm := bloom.NewManager()
+	bm := filter.NewManager()
 	feed := changefeed.New(st, bm, log)
 
 	if err := feed.Init(context.Background(), 1000); err != nil {
@@ -483,9 +523,9 @@ func TestServeStartsEvenWhenRedisIsDown(t *testing.T) {
 	}
 }
 
-// Bloom filter không dựng được lúc khởi động (ở đây: change_log biến mất nên feed.Init lỗi ở bước Head) thì server phải
-// dừng với lỗi, không được chạy tiếp với Bloom rỗng và báo mọi số là an toàn.
-func TestServeStopsWhenTheBloomFilterCannotBeBuilt(t *testing.T) {
+// Filter không dựng được lúc khởi động (ở đây: change_log biến mất nên full build lỗi ở bước Head) thì server
+// KHÔNG được phục vụ với filter rỗng: nó tiếp tục thử lại (leader) / chờ snapshot, và /readyz báo 503 suốt thời gian đó.
+func TestServeStaysNotReadyWhenTheFilterCannotBeBuilt(t *testing.T) {
 	st, dsn := testStore(t)
 
 	if _, err := st.CreateEntry(context.Background(), mustKeyForServe(t), model.EntryInput{Category: "spam", RiskScore: 1}, model.Actor{Email: "t"}); err != nil {
@@ -503,8 +543,49 @@ func TestServeStopsWhenTheBloomFilterCannotBeBuilt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	serveEnv(t, dsn, freeAddr(t), nil)
-	serveMustFail(t, "head")
+	addr := freeAddr(t)
+	serveEnv(t, dsn, addr, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+
+	go func() { errc <- serve(ctx, cancel, quietLog()) }()
+
+	sawNotReady := false
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-errc:
+			t.Fatalf("serve must keep retrying, not exit: %v", err)
+		default:
+		}
+
+		if resp, err := http.Get("http://" + addr + "/readyz"); err == nil {
+			code := resp.StatusCode
+			_ = resp.Body.Close()
+
+			if code == 200 {
+				t.Fatal("/readyz must not report ready without a filter")
+			}
+
+			sawNotReady = code == http.StatusServiceUnavailable
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !sawNotReady {
+		t.Fatal("/readyz never answered 503")
+	}
+
+	cancel()
+
+	select {
+	case <-errc:
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve must stop when its context is cancelled")
+	}
 }
 
 // Một lỗi ở vòng nền (database biến mất) chỉ được ghi log, vòng nền vẫn chạy tiếp và vẫn dừng khi context bị hủy.
@@ -517,7 +598,7 @@ func TestBackgroundJobsSurviveDatabaseErrors(t *testing.T) {
 	t.Cleanup(func() { flushEvery, purgeEvery = oldFlush, oldPurge })
 
 	log := quietLog()
-	bm := bloom.NewManager()
+	bm := filter.NewManager()
 	feed := changefeed.New(st, bm, log)
 
 	if err := feed.Init(context.Background(), 1000); err != nil {

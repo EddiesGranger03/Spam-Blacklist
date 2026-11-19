@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"vsf/internal/bloom"
+	"vsf/internal/filter"
 	"vsf/internal/model"
 	"vsf/internal/normalize"
 	"vsf/internal/seal"
@@ -125,7 +125,7 @@ func TestRebuildCutMidStreamKeepsTheOldFilter(t *testing.T) {
 		keys = append(keys, e.add(t, fmt.Sprintf("0907%06d", i)))
 	}
 
-	bm := bloom.NewManager()
+	bm := filter.NewManager()
 	st := e.proxied(t)
 	feed := New(st, bm, quiet())
 
@@ -193,7 +193,7 @@ func TestSyncNowCutAtAnyPointNeverLosesAChange(t *testing.T) {
 		completed := false
 
 		for k := 1; k <= 20; k++ {
-			bm := bloom.NewManager()
+			bm := filter.NewManager()
 			st := e.proxied(t)
 			feed := New(st, bm, quiet())
 
