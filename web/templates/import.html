@@ -28,3 +28,24 @@
   <a class="btn" href="/admin/export?type=url">Chỉ URL</a>
 </section>
 {{end}}
+
+{{define "import_status"}}
+<div class="job" {{if .Data.Running}}hx-get="/admin/import/{{.Data.ID}}" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
+  <p><strong>Job {{.Data.ID}}</strong> –
+    {{if eq .Data.State "running"}}đang chạy… đã đọc {{.Data.Rows}} dòng (các dòng đã ghi vào DB hiện dần theo từng đợt)
+    {{else if eq .Data.State "done"}}<span class="tag ok">hoàn tất</span>
+    {{else}}<span class="tag warn">thất bại</span>{{end}}
+  </p>
+  <ul>
+    <li>{{if eq .Data.State "running"}}Đã ghi cho tới giờ{{else if eq .Data.State "failed"}}Đã ghi trước khi lỗi{{else}}Kết quả{{end}} – thêm mới: <strong>{{.Data.Inserted}}</strong>, cập nhật (đã tồn tại): <strong>{{.Data.Updated}}</strong></li>
+    <li>Dòng bị loại do lỗi: <strong>{{.Data.Rejected}}</strong></li>
+  </ul>
+  {{if eq .Data.State "failed"}}<p class="muted">Các đợt đã ghi trước khi lỗi được giữ lại. Tải lại đúng file này là an toàn: các dòng đã có sẽ chỉ được cập nhật.</p>{{end}}
+  {{with .Data.Err}}<div class="flash err">{{.}}</div>{{end}}
+  {{if .Data.Errors}}
+    <details open><summary>Lỗi (tối đa 20 dòng đầu)</summary>
+      <ul>{{range .Data.Errors}}<li>{{.}}</li>{{end}}</ul>
+    </details>
+  {{end}}
+</div>
+{{end}}
