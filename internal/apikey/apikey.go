@@ -244,7 +244,7 @@ func (s *Service) load(ctx context.Context, prefix string) (*model.APIKey, error
 
 	// Jitter chỉ RÚT NGẮN TTL (80–100%): key bị thu hồi phải hết hiệu lực trong tối đa cacheTTL như đã cam kết,
 	// nên không được kéo dài quá TTL danh nghĩa.
-	ttl = time.Duration(float64(ttl) * (0.8 + 0.2*mrand.Float64()))
+	ttl = time.Duration(float64(ttl) * (0.8 + 0.2*mrand.Float64()))  // #nosec G404 -- jitter TTL cache để các key không hết hạn cùng lúc, không phải giá trị bảo mật
 
 	s.mu.Lock()
 

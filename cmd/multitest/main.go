@@ -80,7 +80,7 @@ func (n *node) do(method, path string, form url.Values, hdr map[string]string) (
 		body = strings.NewReader(form.Encode())
 	}
 
-	req, err := http.NewRequest(method, n.base+path, body)
+	req, err := http.NewRequest(method, n.base+path, body)  // #nosec G704 -- URL các node do người vận hành truyền qua -nodes, công cụ kiểm thử nội bộ
 	if err != nil {
 		return 0, "", err
 	}
@@ -93,7 +93,7 @@ func (n *node) do(method, path string, form url.Values, hdr map[string]string) (
 		req.Header.Set(k, v)
 	}
 
-	resp, err := n.c.Do(req)
+	resp, err := n.c.Do(req)  // #nosec G704 -- URL các node do người vận hành truyền qua -nodes, công cụ kiểm thử nội bộ
 	if err != nil {
 		return 0, "", err
 	}
@@ -166,7 +166,7 @@ func (n *node) newAPIKey(name string) (string, error) {
 	return "", fmt.Errorf("no API key in response (%d bytes)", len(page))
 }
 
-func phoneNumber() string { return fmt.Sprintf("09%08d", rand.IntN(100_000_000)) }
+func phoneNumber() string { return fmt.Sprintf("09%08d", rand.IntN(100_000_000)) }  // #nosec G404 -- số điện thoại giả để test, không phải giá trị bảo mật
 
 func entryForm(phone, status string) url.Values {
 	return url.Values{"type": {"phone"}, "match_type": {""}, "value": {phone}, "category": {"spam"}, "risk_score": {"50"},
@@ -334,7 +334,7 @@ func (c control) run(tmpl, name, def string) error {
 	}
 
 	cmdline = strings.ReplaceAll(cmdline, "{name}", name)
-	out, err := exec.Command("sh", "-c", cmdline).CombinedOutput()
+	out, err := exec.Command("sh", "-c", cmdline).CombinedOutput()  // #nosec G204 -- lệnh restart/kill do người vận hành truyền qua -restart-cmd/-kill-cmd, đúng mục đích của công cụ
 
 	if err != nil {
 		return fmt.Errorf("%s: %v: %s", cmdline, err, strings.TrimSpace(string(out)))

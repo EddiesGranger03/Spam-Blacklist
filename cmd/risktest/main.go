@@ -102,7 +102,7 @@ func (n *node) write(method, path string, f url.Values) (int, string, error) {
 var keyRe = regexp.MustCompile(`vsf_[a-z0-9]{8}_[a-z0-9]{32}`)
 
 func (n *node) newAPIKey() (string, error) {
-	_, page, err := n.write("POST", "/admin/apikeys", url.Values{"name": {"risk-" + strconv.Itoa(rand.IntN(1e6))},
+	_, page, err := n.write("POST", "/admin/apikeys", url.Values{"name": {"risk-" + strconv.Itoa(rand.IntN(1e6))},  // #nosec G404 -- tên API key thử nghiệm, không phải giá trị bảo mật
 		"rps_limit": {"1000000"}, "daily_quota": {"0"}, "expires_days": {""}})
 	if err != nil {
 		return "", err
@@ -172,7 +172,7 @@ func (n *node) metric(name string) (float64, bool) {
 	return 0, false
 }
 
-func phone() string { return fmt.Sprintf("09%08d", rand.IntN(100_000_000)) }
+func phone() string { return fmt.Sprintf("09%08d", rand.IntN(100_000_000)) }  // #nosec G404 -- số điện thoại giả để test, không phải giá trị bảo mật
 
 func pcts(d []time.Duration) string {
 	if len(d) == 0 {
@@ -242,7 +242,7 @@ func cmdSetup(args []string) {
 }
 
 func uploadCSV(n *node, path string) error {
-	f, err := os.Open(path)
+	f, err := os.Open(path)  // #nosec G304 -- đường dẫn CSV do người vận hành truyền qua flag của công cụ đo nội bộ
 	if err != nil {
 		return err
 	}
@@ -366,7 +366,7 @@ func cmdFresh(args []string) {
 }
 
 func docker(args ...string) (string, error) {
-	out, err := exec.Command("docker", args...).CombinedOutput()
+	out, err := exec.Command("docker", args...).CombinedOutput()  // #nosec G204 -- công cụ đo nội bộ, chỉ gọi "docker" với tham số do script/người vận hành truyền vào
 
 	return strings.TrimSpace(string(out)), err
 }
