@@ -340,3 +340,16 @@ func (c *countingSource) ScanBlacklistHashes(ctx context.Context, emit func(uint
 	c.scans++
 	return c.Store.ScanBlacklistHashes(ctx, emit)
 }
+
+// FILTER_SCAN_BATCH bị chặn trần MaxScanBatch: trang lớn hơn làm mỗi query quét nặng cho DB.
+func TestSetScanOptionsCapsBatch(t *testing.T) {
+	old := scanOpts
+	t.Cleanup(func() { scanOpts = old })
+
+	for in, want := range map[int]int{0: MaxScanBatch, -1: MaxScanBatch, 3000: 3000, MaxScanBatch: MaxScanBatch, 10000: MaxScanBatch} {
+		SetScanOptions(ScanOptions{Batch: in})
+		if scanOpts.Batch != want {
+			t.Errorf("Batch %d: got %d, want %d", in, scanOpts.Batch, want)
+		}
+	}
+}

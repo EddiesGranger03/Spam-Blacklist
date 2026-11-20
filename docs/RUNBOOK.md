@@ -17,7 +17,7 @@ Dành cho người trực vận hành. Cơ chế được mô tả ở [LUONG_VA
 | `FILTER_SNAPSHOT_POLL` | `30s` | Chu kỳ mỗi pod tìm snapshot mới, và chu kỳ thử giành leader. Cũng là thời gian tối đa để một pod mới nhận ra leader cũ đã chết |
 | `FILTER_SNAPSHOT_KEEP` | `3` | Số snapshot giữ lại (mỗi cái ≈ 1,13 byte × số hash) |
 | `FILTER_BOOTSTRAP_TIMEOUT` | `10m` | Pod không phải leader chờ snapshot quá lâu thì ghi **log lỗi** mỗi chừng này (vẫn tiếp tục chờ, `/readyz` 503) |
-| `FILTER_SCAN_BATCH` | `10000` | Số dòng mỗi trang khi leader quét bảng (keyset trên `id`, từng partition một) |
+| `FILTER_SCAN_BATCH` | `5000` | Số dòng mỗi trang khi leader quét bảng, tối đa 5000 (giá trị lớn hơn bị hạ về 5000 để mỗi query nhẹ cho DB) (keyset trên `id`, từng partition một) |
 | `FILTER_SCAN_PAUSE` | `2ms` | Nghỉ giữa các trang để không đè Postgres khi quét. Tăng khi DB đang chịu tải; đặt `0` khi rebuild thủ công lúc ít tải |
 | `FILTER_RETRY_BASE` | `5s` | Chờ bao lâu sau lần dựng/lưu snapshot lỗi đầu tiên; gấp đôi mỗi lần lỗi liên tiếp, có jitter (50% đến 100% giá trị tính được) |
 | `FILTER_RETRY_MAX` | `10m` | Trần của thời gian chờ đó (jitter không bao giờ vượt trần) |

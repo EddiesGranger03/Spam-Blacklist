@@ -127,7 +127,7 @@ go run ./cmd/bench -url http://127.0.0.1:8090 -key vsf_... -file data.csv -c 64 
 | `FILTER_SNAPSHOT_KEEP` | `3` | số snapshot giữ lại |
 | `FILTER_BOOTSTRAP_TIMEOUT` | `10m` | pod chờ snapshot của leader quá lâu thì ghi log lỗi mỗi chừng này (vẫn chờ, `/readyz` 503) |
 | `FILTER_RETRY_BASE` / `FILTER_RETRY_MAX` | `5s` / `10m` | backoff mũ (có jitter) sau lần dựng/lưu snapshot lỗi; `Save` lỗi thì chỉ thử lại Save, không quét lại bảng |
-| `FILTER_SCAN_BATCH` / `FILTER_SCAN_PAUSE` | `10000` / `2ms` | số dòng mỗi trang và thời gian nghỉ giữa các trang khi leader quét bảng (giảm tải DB) |
+| `FILTER_SCAN_BATCH` / `FILTER_SCAN_PAUSE` | `5000` / `2ms` | số dòng mỗi trang (tối đa 5000) và thời gian nghỉ giữa các trang khi leader quét bảng (giảm tải DB) |
 | `RATE_LIMIT_RPS` | `100` | giới hạn mặc định mỗi key; có `REDIS_ADDR` thì bộ đếm nằm ở Redis, dùng chung mọi instance (Redis lỗi thì cho qua), không có Redis thì đếm trong bộ nhớ từng instance |
 | `DATA_PEPPER_OLD` | – | chỉ cho `cmd/rotate-pepper`: pepper mà dữ liệu đang lưu dưới nó, xem "Xoay DATA_PEPPER" |
 

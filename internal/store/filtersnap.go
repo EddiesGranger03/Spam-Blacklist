@@ -20,16 +20,19 @@ const BlacklistPartitions = 32
 
 // ScanOptions throttles the full scan used to build a filter snapshot.
 type ScanOptions struct {
-	Batch int           // rows per keyset page (default 10000)
+	Batch int           // rows per keyset page (default and maximum: MaxScanBatch)
 	Pause time.Duration // sleep between pages, to bound load on the database
 }
 
-var scanOpts = ScanOptions{Batch: 10000, Pause: 2 * time.Millisecond}
+// MaxScanBatch caps the rows read per page during a full scan: larger pages make each query heavier on the database.
+const MaxScanBatch = 5000
+
+var scanOpts = ScanOptions{Batch: MaxScanBatch, Pause: 2 * time.Millisecond}
 
 // SetScanOptions configures ScanBlacklistHashes (call at startup).
 func SetScanOptions(o ScanOptions) {
-	if o.Batch <= 0 {
-		o.Batch = 10000
+	if o.Batch <= 0 || o.Batch > MaxScanBatch {
+		o.Batch = MaxScanBatch
 	}
 
 	scanOpts = o

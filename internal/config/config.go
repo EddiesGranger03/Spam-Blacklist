@@ -80,7 +80,7 @@ type Config struct {
 	FilterSnapshotPoll     time.Duration // FILTER_SNAPSHOT_POLL, mặc định 30s: chu kỳ tìm snapshot mới / bầu leader
 	FilterSnapshotKeep     int           // FILTER_SNAPSHOT_KEEP, mặc định 3
 	FilterBootstrapTimeout time.Duration // FILTER_BOOTSTRAP_TIMEOUT, mặc định 10m: pod chờ leader quá lâu thì log lỗi
-	FilterScanBatch        int           // FILTER_SCAN_BATCH, mặc định 10000 dòng/trang khi quét
+	FilterScanBatch        int           // FILTER_SCAN_BATCH, mặc định 5000 dòng/trang khi quét, tối đa 5000 (nhỏ để mỗi query nhẹ cho DB)
 	FilterScanPause        time.Duration // FILTER_SCAN_PAUSE, mặc định 2ms nghỉ giữa các trang
 	FilterRetryBase        time.Duration // FILTER_RETRY_BASE, mặc định 5s: chờ sau lần dựng/lưu snapshot lỗi đầu tiên (gấp đôi mỗi lần)
 	FilterRetryMax         time.Duration // FILTER_RETRY_MAX, mặc định 10m: trần của thời gian chờ đó
@@ -125,7 +125,7 @@ func Load() (Config, error) {
 		FilterSnapshotPoll:      getenvDuration("FILTER_SNAPSHOT_POLL", 30*time.Second),
 		FilterSnapshotKeep:      getenvInt("FILTER_SNAPSHOT_KEEP", 3),
 		FilterBootstrapTimeout:  getenvDuration("FILTER_BOOTSTRAP_TIMEOUT", 10*time.Minute),
-		FilterScanBatch:         getenvInt("FILTER_SCAN_BATCH", 10000),
+		FilterScanBatch:         getenvInt("FILTER_SCAN_BATCH", 5000),
 		FilterScanPause:         getenvDuration("FILTER_SCAN_PAUSE", 2*time.Millisecond),
 		FilterRetryBase:         getenvDuration("FILTER_RETRY_BASE", 5*time.Second),
 		FilterRetryMax:          getenvDuration("FILTER_RETRY_MAX", 10*time.Minute),
