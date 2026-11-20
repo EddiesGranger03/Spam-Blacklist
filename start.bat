@@ -21,10 +21,12 @@ if errorlevel 1 (
 )
 
 echo [2/4] Bat Postgres + Redis (du lieu duoc giu nguyen)...
-docker compose -f deploy/docker-compose.yml up -d
+rem --wait: cho Postgres qua healthcheck (pg_isready) roi moi chay tiep. Khong cho thi server co the
+rem ket noi luc Postgres con "starting up" va thoat ngay (loi SQLSTATE 57P03).
+docker compose -f deploy/docker-compose.yml up -d --wait --wait-timeout 120
 if errorlevel 1 (
     echo.
-    echo [LOI] Khong bat duoc Postgres/Redis. Xem thong bao o tren.
+    echo [LOI] Postgres/Redis khong san sang sau 120 giay. Xem thong bao o tren.
     pause
     exit /b 1
 )
